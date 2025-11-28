@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+venv/
+.venv/
+
+# IDE / editor
+.vscode/
+.idea/
+*.iml
+
+# Output generato
+output/
+*.log
+
+# Altro
+.DS_Store
