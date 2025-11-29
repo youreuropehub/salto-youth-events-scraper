@@ -8,6 +8,7 @@ import time
 import csv
 import re
 from io import StringIO, BytesIO
+from datetime import date
 from flask import Flask, render_template, jsonify, send_file
 from flask_socketio import SocketIO, emit
 from bs4 import BeautifulSoup
@@ -18,13 +19,59 @@ app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 BASE_URL = "https://www.salto-youth.net"
-SEARCH_URL = BASE_URL + "/tools/european-training-calendar/browse/"
 
 # Variabile globale per memorizzare i risultati
 scraped_data = []
 
 # Cartella per salvare il CSV
 OUTPUT_DIR = "output"
+
+
+def build_search_url(offset: int) -> str:
+    """
+    Costruisce l'URL di ricerca SALTO con:
+    - offset variabile (paginazione)
+    - date basate sul giorno corrente
+    """
+    today = date.today()
+    day = today.day
+    month = today.month
+    year = today.year
+
+    base = (
+        "https://www.salto-youth.net/tools/european-training-calendar/browse/"
+        "?b_offset={offset}&b_limit=10"
+        "&b_order=applicationDeadline"
+        "&b_keyword="
+        "&b_begin_date_after_day={day}"
+        "&b_begin_date_after_month={month}"
+        "&b_begin_date_after_year={year}"
+        "&b_begin_date_before_day="
+        "&b_begin_date_before_month="
+        "&b_begin_date_before_year="
+        "&b_end_date_after_day="
+        "&b_end_date_after_month="
+        "&b_end_date_after_year="
+        "&b_end_date_before_day="
+        "&b_end_date_before_month="
+        "&b_end_date_before_year="
+        "&b_activity_type="
+        "&b_country="
+        "&b_participating_countries="
+        "&b_application_deadline_after_day={day}"
+        "&b_application_deadline_after_month={month}"
+        "&b_application_deadline_after_year={year}"
+        "&b_application_deadline_before_day="
+        "&b_application_deadline_before_month="
+        "&b_application_deadline_before_year="
+    )
+
+    return base.format(
+        offset=offset,
+        day=day,
+        month=month,
+        year=year,
+    )
 
 
 def parse_list_page(html):
@@ -155,7 +202,7 @@ def parse_detail_page(html, detail_url):
     - participants_no, participants_from, recommended_for
     - accessibility, working_language, organiser
     - participation_fee, accommodation_food, travel_reimbursement
-    - infopack_downloads (tutti i link nella sezione "Available downloads")
+    - infopack_downloads (URL del primo link nella sezione "Available downloads")
     - application_procedure_url (link "Apply now!")
     """
     soup = BeautifulSoup(html, "html.parser")
@@ -451,26 +498,35 @@ def scrape_events():
     # Usa un dizionario per deduplicare per detail_url
     events_dict = {}
 
-    # Ciclo sulle pagine di lista (6 pagine)
-    for page in range(1, 7):
-        msg = f"Caricamento pagina {page}/6..."
+    # Paginazione dinamica: continua finché ci sono eventi
+    page = 0
+    max_pages = 50  # limite di sicurezza per evitare loop infiniti
+    page_size = 10  # deve essere uguale a b_limit nell'URL
+
+    while page < max_pages:
+        offset = page * page_size  # 0, 10, 20, 30, ...
+        msg = f"Caricamento pagina {page + 1} (offset={offset})..."
         socketio.emit("log", {"message": msg})
         print(f"DEBUG: {msg}")
 
         try:
-            # Costruisci URL con parametro page
-            url = f"{SEARCH_URL}?page={page}"
+            url = build_search_url(offset)
             resp = session.get(url, timeout=15)
             resp.raise_for_status()
             print(f"DEBUG: URL chiamato: {resp.url}")
         except Exception as e:
-            err = f"Errore caricamento pagina {page}: {e}"
+            err = f"Errore caricamento pagina {page + 1}: {e}"
             socketio.emit("log", {"message": err})
             print(f"DEBUG: {err}")
-            continue
+            break
 
         events = parse_list_page(resp.text)
-        print(f"DEBUG: pagina {page}, eventi trovati: {len(events)}")
+        print(f"DEBUG: pagina {page + 1}, eventi trovati: {len(events)}")
+
+        # Se la pagina non ha eventi → fine paginazione
+        if not events:
+            print("DEBUG: nessun evento trovato, fine paginazione")
+            break
 
         # Aggiungi al dizionario usando detail_url come chiave (deduplica automatica)
         for event in events:
@@ -479,6 +535,7 @@ def scrape_events():
                 events_dict[detail_url] = event
 
         print(f"DEBUG: totale eventi unici finora: {len(events_dict)}")
+        page += 1
         time.sleep(1)
 
     # Converti il dizionario in lista
@@ -626,6 +683,60 @@ def api_scrape():
         "csv_path": f"{OUTPUT_DIR}/salto_events_complete.csv",
         "message": "Scraping completato. CSV salvato."
     })
+
+
+@app.route("/api/scrape_and_download", methods=["POST", "GET"])
+def api_scrape_and_download():
+    """
+    Endpoint che fa lo scraping e restituisce direttamente il CSV
+    Perfetto per Make.com
+    """
+    print("DEBUG: /api/scrape_and_download chiamato")
+
+    # Esegui lo scraping
+    scrape_events()
+
+    if not scraped_data:
+        return jsonify({"status": "error", "message": "Nessun dato trovato"}), 400
+
+    # Crea CSV in memoria
+    text_buffer = StringIO()
+    fieldnames = [
+        "title",
+        "type",
+        "dates",
+        "location",
+        "application_deadline",
+        "participants_no",
+        "participants_from",
+        "recommended_for",
+        "accessibility",
+        "working_language",
+        "organiser",
+        "participation_fee",
+        "accommodation_food",
+        "travel_reimbursement",
+        "infopack_downloads",
+        "application_procedure_url",
+        "application_form_link",
+        "detail_url",
+    ]
+    writer = csv.DictWriter(text_buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in scraped_data:
+        writer.writerow(row)
+
+    # Converte in bytes
+    text_value = text_buffer.getvalue()
+    bytes_buffer = BytesIO(text_value.encode("utf-8"))
+    bytes_buffer.seek(0)
+
+    return send_file(
+        bytes_buffer,
+        mimetype="text/csv; charset=utf-8",
+        as_attachment=True,
+        download_name="salto_events_complete.csv",
+    )
 
 
 if __name__ == "__main__":
