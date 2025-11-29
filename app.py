@@ -1,3 +1,7 @@
+# IMPORTANTE: monkey patching di gevent PRIMA di qualsiasi altro import
+from gevent import monkey
+monkey.patch_all()
+
 import os
 import time
 import csv
@@ -11,6 +15,7 @@ import requests
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, cors_allowed_origins="*")
+
 
 BASE_URL = "https://www.salto-youth.net"
 SEARCH_URL = BASE_URL + "/tools/european-training-calendar/browse/"
