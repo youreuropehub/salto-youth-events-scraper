@@ -30,13 +30,13 @@ OUTPUT_DIR = "output"
 def parse_list_page(html):
     """
     Estrae gli eventi dalla pagina di lista SALTO (European Training Calendar).
-    Prova due metodi:
-    1. Cerca <h3> con link (metodo vecchio script)
+    Usa DUE metodi in parallelo e deduplica:
+    1. Cerca <h3> con link
     2. Cerca tutti i link che puntano a /tools/european-training-calendar/training/
     """
     soup = BeautifulSoup(html, "html.parser")
-    events = []
     seen_urls = set()
+    events = []
 
     # METODO 1: cerca <h3> con link
     for h3 in soup.find_all("h3"):
@@ -89,65 +89,62 @@ def parse_list_page(html):
             }
         )
 
-    # METODO 2: se non ha trovato nulla con <h3>, cerca tutti i link diretti
-    if not events:
-        for link in soup.select(
-                "a[href*='/tools/european-training-calendar/training/']"
-        ):
-            title = link.get_text(strip=True)
-            if not title:
-                continue
+    # METODO 2: cerca ANCHE tutti i link diretti (non solo se events è vuoto)
+    for link in soup.select("a[href*='/tools/european-training-calendar/training/']"):
+        title = link.get_text(strip=True)
+        if not title:
+            continue
 
-            detail_url = link.get("href", "").strip()
-            if detail_url and not detail_url.startswith("http"):
-                detail_url = BASE_URL + detail_url
+        detail_url = link.get("href", "").strip()
+        if detail_url and not detail_url.startswith("http"):
+            detail_url = BASE_URL + detail_url
 
-            if detail_url in seen_urls:
-                continue
-            seen_urls.add(detail_url)
+        if detail_url in seen_urls:
+            continue
+        seen_urls.add(detail_url)
 
-            # Contenitore principale del blocco evento
-            container = link.find_parent()
-            for _ in range(4):
-                if container and container.name not in ["body", "html"]:
-                    container = container.parent
+        # Contenitore principale del blocco evento
+        container = link.find_parent()
+        for _ in range(4):
+            if container and container.name not in ["body", "html"]:
+                container = container.parent
 
-            text_block = container.get_text("\n", strip=True) if container else ""
-            lines = [l.strip() for l in text_block.split("\n") if l.strip()]
+        text_block = container.get_text("\n", strip=True) if container else ""
+        lines = [l.strip() for l in text_block.split("\n") if l.strip()]
 
-            try:
-                idx = lines.index(title)
-            except ValueError:
-                idx = 0
+        try:
+            idx = lines.index(title)
+        except ValueError:
+            idx = 0
 
-            type_ = ""
-            dates = ""
-            location = ""
-            app_deadline = ""
+        type_ = ""
+        dates = ""
+        location = ""
+        app_deadline = ""
 
-            if idx - 1 >= 0:
-                type_ = lines[idx - 1]
-            if idx + 1 < len(lines):
-                dates = lines[idx + 1]
-            if idx + 2 < len(lines):
-                location = lines[idx + 2]
+        if idx - 1 >= 0:
+            type_ = lines[idx - 1]
+        if idx + 1 < len(lines):
+            dates = lines[idx + 1]
+        if idx + 2 < len(lines):
+            location = lines[idx + 2]
 
-            for i, line in enumerate(lines):
-                if "Application deadline" in line:
-                    if i + 1 < len(lines):
-                        app_deadline = lines[i + 1]
-                    break
+        for i, line in enumerate(lines):
+            if "Application deadline" in line:
+                if i + 1 < len(lines):
+                    app_deadline = lines[i + 1]
+                break
 
-            events.append(
-                {
-                    "title": title,
-                    "type": type_,
-                    "dates": dates,
-                    "location": location,
-                    "application_deadline": app_deadline,
-                    "detail_url": detail_url,
-                }
-            )
+        events.append(
+            {
+                "title": title,
+                "type": type_,
+                "dates": dates,
+                "location": location,
+                "application_deadline": app_deadline,
+                "detail_url": detail_url,
+            }
+        )
 
     return events
 
