@@ -1,5 +1,6 @@
 # IMPORTANTE: monkey patching di gevent PRIMA di qualsiasi altro import
 from gevent import monkey
+
 monkey.patch_all()
 
 import os
@@ -15,7 +16,6 @@ import requests
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, cors_allowed_origins="*")
-
 
 BASE_URL = "https://www.salto-youth.net"
 SEARCH_URL = BASE_URL + "/tools/european-training-calendar/browse/"
@@ -450,6 +450,10 @@ def scrape_events():
     )
 
     print("DEBUG: inizio scraping pagine lista...")
+
+    # Usa un dizionario per deduplicare per detail_url
+    events_dict = {}
+
     # Ciclo sulle pagine di lista (6 pagine)
     for page in range(1, 7):
         msg = f"Caricamento pagina {page}/6..."
@@ -470,10 +474,20 @@ def scrape_events():
 
         events = parse_list_page(resp.text)
         print(f"DEBUG: pagina {page}, eventi trovati: {len(events)}")
-        scraped_data.extend(events)
+
+        # Aggiungi al dizionario usando detail_url come chiave (deduplica automatica)
+        for event in events:
+            detail_url = event.get("detail_url", "")
+            if detail_url and detail_url not in events_dict:
+                events_dict[detail_url] = event
+
+        print(f"DEBUG: totale eventi unici finora: {len(events_dict)}")
         time.sleep(1)
 
-    print(f"DEBUG: totale eventi raccolti dalla lista: {len(scraped_data)}")
+    # Converti il dizionario in lista
+    scraped_data = list(events_dict.values())
+
+    print(f"DEBUG: totale eventi unici raccolti dalla lista: {len(scraped_data)}")
     socketio.emit("log", {"message": f"Totale eventi trovati: {len(scraped_data)}"})
 
     # Ora visita ogni dettaglio per estrarre tutti i campi
@@ -525,9 +539,9 @@ def scrape_events():
     # Salva automaticamente il CSV
     save_csv_to_file()
 
-    socketio.emit("log", {"message": "Scraping completato!"})
+    socketio.emit("log", {"message": f"Scraping completato! Totale: {len(scraped_data)} eventi"})
     socketio.emit("scraping_done", {"count": len(scraped_data)})
-    print("DEBUG: scraping completato!")
+    print(f"DEBUG: scraping completato! Totale eventi unici: {len(scraped_data)}")
 
 
 # ========== ROUTES ==========
