@@ -207,18 +207,6 @@ def parse_detail_page(html, detail_url):
     """
     soup = BeautifulSoup(html, "html.parser")
 
-#Giodo Start
-#    
- #   application_deadline = ""
-
-  #  for label in soup.find_all(["strong", "b"]):
-   #     if "Application deadline" in label.get_text():
-    #        parent = label.parent.get_text(" ", strip=True)
-     #       application_deadline = parent.replace(
-      #          "Application deadline", ""
-       #     ).replace(":", "").strip()
-        #    break
-#Giodo End
     
     # ---------- Training overview (blocchetto centrale) ----------
     training_overview = ""
@@ -402,7 +390,6 @@ def parse_detail_page(html, detail_url):
         "travel_reimbursement": travel_reimbursement,
         "infopack_downloads": infopack_downloads,
         "application_procedure_url": application_procedure_url,
-        "application_deadline": application_deadline,
     }
 
 
