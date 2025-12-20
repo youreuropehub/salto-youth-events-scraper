@@ -67,21 +67,18 @@ def extract_application_deadline(soup: BeautifulSoup) -> str:
     for tag in soup.find_all(class_=re.compile(r"mrgn-btm")):
         text = tag.get_text(" ", strip=True)
         match = re.search(
-            r"Application deadline\s*(?:\(24h UTC\))?\s*[:]\s*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4})",
+            r"Application deadline\s*[:]\s*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4})",
             text
         )
         if match:
             return match.group(1).strip()
-
-    # fallback nel testo completo
     full_text = soup.get_text(" ", strip=True)
     match = re.search(
-        r"Application deadline\s*(?:\(24h UTC\))?\s*[:]\s*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4})",
+        r"Application deadline\s*[:]\s*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4})",
         full_text
     )
     if match:
         return match.group(1).strip()
-
     return ""
 
 
@@ -120,7 +117,6 @@ def parse_list_page(html):
         dates = lines[idx + 1] if idx + 1 < len(lines) else ""
         location = lines[idx + 2] if idx + 2 < len(lines) else ""
 
-        # application_deadline verrà sovrascritta dal dettaglio
         events.append({
             "title": title,
             "type": type_,
@@ -138,7 +134,9 @@ def parse_detail_page(html, detail_url):
 
     # ---------- Training overview ----------
     training_overview = ""
-    h3_overview = soup.find(lambda tag: tag.name in ["h3", "h4"] and "Training overview" in tag.get_text())
+    h3_overview = soup.find(
+        lambda tag: tag.name in ["h3", "h4"] and "Training overview" in tag.get_text()
+    )
     if h3_overview:
         parts = []
         for sib in h3_overview.find_next_siblings():
@@ -146,6 +144,18 @@ def parse_detail_page(html, detail_url):
                 break
             parts.append(sib.get_text("\n", strip=True))
         training_overview = "\n".join(parts).strip()
+
+    # ---------- Training summary (class mrgn-btm-44 wysiwyg) ----------
+    training_summary = ""
+    summary_tag = soup.find(class_=re.compile(r"mrgn-btm-44\s+wysiwyg"))
+    if summary_tag:
+        training_summary = summary_tag.get_text("\n", strip=True)
+
+    # ---------- Training description (class training-description running-text wysiwyg mrgn-btm-33) ----------
+    training_description = ""
+    desc_tag = soup.find(class_=re.compile(r"training-description\s+running-text\s+wysiwyg\s+mrgn-btm-33"))
+    if desc_tag:
+        training_description = desc_tag.get_text("\n", strip=True)
 
     participants_no = participants_from = recommended_for = working_lang = organiser = ""
     lines = [l.strip() for l in training_overview.splitlines() if l.strip()]
@@ -175,7 +185,9 @@ def parse_detail_page(html, detail_url):
 
     # ---------- Accessibility ----------
     accessibility = ""
-    h_acc = soup.find(lambda tag: tag.name in ["h3", "h4"] and "Accessibility info" in tag.get_text())
+    h_acc = soup.find(
+        lambda tag: tag.name in ["h3", "h4"] and "Accessibility info" in tag.get_text()
+    )
     if h_acc:
         parts = []
         for sib in h_acc.find_next_siblings():
@@ -184,7 +196,7 @@ def parse_detail_page(html, detail_url):
             parts.append(sib.get_text(" ", strip=True))
         accessibility = " ".join(parts).strip()
 
-    # ---------- Costs ----------
+    # ---------- Costs section ----------
     def section_after_heading(text):
         h = soup.find(lambda tag: tag.name in ["h3", "h4"] and text in tag.get_text())
         if not h:
@@ -200,7 +212,7 @@ def parse_detail_page(html, detail_url):
     accommodation_food = section_after_heading("Accommodation and food")
     travel_reimbursement = section_after_heading("Travel reimbursement")
 
-    # ---------- Downloads ----------
+    # ---------- Downloads (infopack) ----------
     infopack_downloads = ""
     downloads_heading = None
     for tag in soup.find_all(['h3', 'h4', 'h5', 'strong', 'b', 'p']):
@@ -245,9 +257,12 @@ def parse_detail_page(html, detail_url):
         "infopack_downloads": infopack_downloads,
         "application_procedure_url": application_procedure_url,
         "training_overview": training_overview,
+        "training_summary": training_summary,
+        "training_description": training_description,
         "application_deadline": application_deadline,
     }
 
+# ================= EXTERNAL APPLICATION LINK =================
 
 def get_external_application_link(application_procedure_url):
     if not application_procedure_url:
@@ -260,7 +275,7 @@ def get_external_application_link(application_procedure_url):
         if external_link and external_link.get("href"):
             return external_link["href"]
         for a in soup.find_all("a", href=True):
-            if any(domain in a["href"] for domain in ["forms.gle","google.com/forms","typeform.com","surveymonkey.com","jotform.com"]):
+            if any(domain in a["href"] for domain in ["forms.gle","google.com/forms","typeform.com","jotform.com"]):
                 return a["href"]
         return ""
     except Exception as e:
@@ -280,6 +295,7 @@ def save_csv_to_file():
 
     fieldnames = [
         "title","type","dates","location","application_deadline","training_overview",
+        "training_summary","training_description",
         "participants_no","participants_from","recommended_for","accessibility",
         "working_language","organiser","participation_fee","accommodation_food",
         "travel_reimbursement",
@@ -360,7 +376,7 @@ def scrape_events():
             for key in ["participants_no","participants_from","recommended_for","accessibility",
                         "working_language","organiser","participation_fee","accommodation_food",
                         "travel_reimbursement","infopack_downloads","application_procedure_url",
-                        "application_form_link","training_overview","application_deadline"]:
+                        "application_form_link","training_overview","training_summary","training_description","application_deadline"]:
                 event[key] = ""
         time.sleep(1)
 
@@ -391,6 +407,7 @@ def download_csv():
     text_buffer = StringIO()
     fieldnames = [
         "title","type","dates","location","application_deadline","training_overview",
+        "training_summary","training_description",
         "participants_no","participants_from","recommended_for","accessibility",
         "working_language","organiser","participation_fee","accommodation_food",
         "travel_reimbursement",
@@ -428,6 +445,7 @@ def api_scrape_and_download():
     text_buffer = StringIO()
     fieldnames = [
         "title","type","dates","location","application_deadline","training_overview",
+        "training_summary","training_description",
         "participants_no","participants_from","recommended_for","accessibility",
         "working_language","organiser","participation_fee","accommodation_food",
         "travel_reimbursement",
