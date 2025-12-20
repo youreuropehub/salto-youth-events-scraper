@@ -126,7 +126,9 @@ def parse_list_page(html):
 def parse_detail_page(html, detail_url):
     soup = BeautifulSoup(html, "html.parser")
 
+    # ---------- Training overview ----------
     training_overview = ""
+    training_description = ""
     h3_overview = soup.find(lambda tag: tag.name in ["h3", "h4"] and "Training overview" in tag.get_text())
     if h3_overview:
         parts = []
@@ -134,10 +136,19 @@ def parse_detail_page(html, detail_url):
             if sib.name and sib.name.startswith("h"):
                 break
             parts.append(sib.get_text("\n", strip=True))
-        training_overview = "\n".join(parts).strip()
+        training_description = "\n".join(parts).strip()
+
+        # Per summary, togliere info strutturate tipo "For participants", "Working language", "Organiser"
+        lines = [l.strip() for l in training_description.splitlines() if l.strip()]
+        filtered_lines = []
+        skip_keywords = ["participants", "recommended for", "working language", "organiser"]
+        for l in lines:
+            if not any(k.lower() in l.lower() for k in skip_keywords):
+                filtered_lines.append(l)
+        training_overview = "\n".join(filtered_lines).strip()
 
     participants_no = participants_from = recommended_for = working_lang = organiser = ""
-    lines = [l.strip() for l in training_overview.splitlines() if l.strip()]
+    lines = [l.strip() for l in training_description.splitlines() if l.strip()]
 
     i = 0
     while i < len(lines):
@@ -162,6 +173,7 @@ def parse_detail_page(html, detail_url):
             organiser = after if after else (lines[i + 1].strip() if i + 1 < len(lines) else "")
         i += 1
 
+    # ---------- Accessibility ----------
     accessibility = ""
     h_acc = soup.find(lambda tag: tag.name in ["h3", "h4"] and "Accessibility info" in tag.get_text())
     if h_acc:
@@ -172,6 +184,7 @@ def parse_detail_page(html, detail_url):
             parts.append(sib.get_text(" ", strip=True))
         accessibility = " ".join(parts).strip()
 
+    # ---------- Costs ----------
     def section_after_heading(text):
         h = soup.find(lambda tag: tag.name in ["h3", "h4"] and text in tag.get_text())
         if not h:
@@ -187,6 +200,7 @@ def parse_detail_page(html, detail_url):
     accommodation_food = section_after_heading("Accommodation and food")
     travel_reimbursement = section_after_heading("Travel reimbursement")
 
+    # ---------- Downloads ----------
     infopack_downloads = ""
     downloads_heading = None
     for tag in soup.find_all(['h3', 'h4', 'h5', 'strong', 'b', 'p']):
@@ -205,6 +219,7 @@ def parse_detail_page(html, detail_url):
                 infopack_downloads = href
                 break
 
+    # ---------- Application procedure ----------
     application_procedure_url = ""
     for link in soup.find_all("a", href=True):
         if "/application-procedure/" in link["href"]:
@@ -229,191 +244,7 @@ def parse_detail_page(html, detail_url):
         "infopack_downloads": infopack_downloads,
         "application_procedure_url": application_procedure_url,
         "training_overview": training_overview,
+        "training_summary": training_overview,
+        "training_description": training_description,
         "application_deadline": application_deadline,
     }
-
-
-def get_external_application_link(application_procedure_url):
-    if not application_procedure_url:
-        return ""
-    try:
-        eventlet.sleep(0)  # lascia che il server gestisca ping
-        resp = requests.get(application_procedure_url, timeout=10)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        external_link = soup.find("a", string=re.compile(r"Proceed to the external", re.IGNORECASE))
-        if external_link and external_link.get("href"):
-            return external_link["href"]
-        for a in soup.find_all("a", href=True):
-            if any(domain in a["href"] for domain in ["forms.gle","google.com/forms","typeform.com","surveymonkey.com","jotform.com"]):
-                return a["href"]
-        return ""
-    except Exception as e:
-        print(f"Error fetching application link from {application_procedure_url}: {e}")
-        return ""
-
-
-# ================= CSV =================
-
-def save_csv_to_file():
-    if not scraped_data:
-        print("DEBUG: nessun dato da salvare")
-        return
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    csv_path = os.path.join(OUTPUT_DIR, "salto_events_complete.csv")
-
-    fieldnames = [
-        "title","type","dates","location","application_deadline","training_overview",
-        "participants_no","participants_from","recommended_for","accessibility",
-        "working_language","organiser","participation_fee","accommodation_food",
-        "travel_reimbursement",
-        "infopack_downloads","application_procedure_url","application_form_link","detail_url"
-    ]
-
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(scraped_data)
-
-    print(f"DEBUG: CSV salvato in {csv_path}")
-    socketio.emit("log", {"message": f"CSV salvato in {csv_path}"})
-
-
-# ================= SCRAPING =================
-
-def scrape_events():
-    global scraped_data
-    scraped_data = []
-    session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0"})
-
-    events_dict = {}
-    page = 0
-    max_pages = 50
-    page_size = 10
-
-    while page < max_pages:
-        offset = page * page_size
-        msg = f"Caricamento pagina {page + 1} (offset={offset})..."
-        socketio.emit("log", {"message": msg})
-        eventlet.sleep(0)
-        try:
-            url = build_search_url(offset)
-            resp = session.get(url, timeout=15)
-            resp.raise_for_status()
-        except Exception as e:
-            print(f"Errore caricamento pagina {page + 1}: {e}")
-            break
-
-        events = parse_list_page(resp.text)
-        if not events:
-            break
-
-        for event in events:
-            detail_url = event.get("detail_url", "")
-            if detail_url and detail_url not in events_dict:
-                events_dict[detail_url] = event
-
-        page += 1
-        eventlet.sleep(0.1)
-
-    scraped_data = list(events_dict.values())
-    socketio.emit("log", {"message": f"Totale eventi trovati: {len(scraped_data)}"})
-    eventlet.sleep(0)
-
-    # batch di dettagli per evitare blocco WebSocket
-    batch_size = 5
-    for i in range(0, len(scraped_data), batch_size):
-        batch = scraped_data[i:i+batch_size]
-        for idx, event in enumerate(batch, start=i+1):
-            detail_url = event.get("detail_url", "")
-            if not detail_url:
-                continue
-            msg = f"[{idx}/{len(scraped_data)}] {event['title']}"
-            socketio.emit("log", {"message": msg})
-            eventlet.sleep(0)
-            try:
-                resp = session.get(detail_url, timeout=15)
-                resp.raise_for_status()
-                detail = parse_detail_page(resp.text, detail_url)
-                if detail.get("application_procedure_url"):
-                    detail["application_form_link"] = get_external_application_link(detail["application_procedure_url"])
-                else:
-                    detail["application_form_link"] = ""
-                event.update(detail)
-            except Exception as e:
-                print(f"Errore dettaglio {detail_url}: {e}")
-                for key in ["participants_no","participants_from","recommended_for","accessibility",
-                            "working_language","organiser","participation_fee","accommodation_food",
-                            "travel_reimbursement","infopack_downloads","application_procedure_url",
-                            "application_form_link","training_overview","application_deadline"]:
-                    event[key] = ""
-            eventlet.sleep(0.1)
-
-    save_csv_to_file()
-    socketio.emit("log", {"message": f"Scraping completato! Totale: {len(scraped_data)} eventi"})
-    socketio.emit("scraping_done", {"count": len(scraped_data)})
-    eventlet.sleep(0)
-    print(f"DEBUG: scraping completato! Totale eventi unici: {len(scraped_data)}")
-
-
-# ================= ROUTES =================
-
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-
-@socketio.on("start_scraping")
-def handle_start_scraping():
-    emit("log", {"message": "Avvio scraping..."})
-    socketio.start_background_task(scrape_events)
-
-
-@app.route("/download_csv")
-def download_csv():
-    if not scraped_data:
-        return "Nessun dato disponibile", 400
-
-    text_buffer = StringIO()
-    fieldnames = [
-        "title","type","dates","location","application_deadline","training_overview",
-        "participants_no","participants_from","recommended_for","accessibility",
-        "working_language","organiser","participation_fee","accommodation_food",
-        "travel_reimbursement",
-        "infopack_downloads","application_procedure_url","application_form_link","detail_url"
-    ]
-    writer = csv.DictWriter(text_buffer, fieldnames=fieldnames)
-    writer.writeheader()
-    for row in scraped_data:
-        writer.writerow(row)
-
-    bytes_buffer = BytesIO(text_buffer.getvalue().encode("utf-8"))
-    bytes_buffer.seek(0)
-
-    return send_file(bytes_buffer, mimetype="text/csv; charset=utf-8",
-                     as_attachment=True, download_name="salto_events_complete.csv")
-
-
-@app.route("/api/scrape", methods=["POST", "GET"])
-def api_scrape():
-    socketio.start_background_task(scrape_events)
-    return jsonify({
-        "status": "started",
-        "message": "Scraping avviato in background."
-    })
-
-
-@app.route("/api/scrape_and_download", methods=["POST", "GET"])
-def api_scrape_and_download():
-    socketio.start_background_task(scrape_events)
-    return jsonify({
-        "status": "started",
-        "message": "Scraping avviato in background. Puoi scaricare il CSV successivamente."
-    })
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    socketio.run(app, host="0.0.0.0", port=port, debug=False, use_reloader=False)
