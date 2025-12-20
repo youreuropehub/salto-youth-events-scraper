@@ -3,7 +3,6 @@ from gevent import monkey
 monkey.patch_all()
 
 import os
-import time
 import csv
 import re
 from io import StringIO, BytesIO
@@ -12,6 +11,7 @@ from flask import Flask, render_template, jsonify, send_file
 from flask_socketio import SocketIO, emit
 from bs4 import BeautifulSoup
 import requests
+from gevent.pool import Pool
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
@@ -60,9 +60,6 @@ def build_search_url(offset: int) -> str:
 
 
 def extract_application_deadline(soup: BeautifulSoup) -> str:
-    """
-    Cerca "Application deadline" e ritorna la data formattata.
-    """
     text = soup.get_text("\n", strip=True)
     match = re.search(r"Application deadline\s*[:\n]?\s*(\d{1,2}/\d{1,2}/\d{4})", text)
     if match:
@@ -286,7 +283,34 @@ def save_csv_to_file():
     socketio.emit("log", {"message": f"CSV salvato in {csv_path}"})
 
 
-# ================= SCRAPING =================
+# ================= PARALLEL SCRAPING =================
+
+def process_event_detail(event, session, idx, total):
+    detail_url = event.get("detail_url", "")
+    if not detail_url:
+        return
+
+    msg = f"[{idx}/{total}] {event['title']}"
+    socketio.emit("log", {"message": msg})
+    print(msg)
+
+    try:
+        resp = session.get(detail_url, timeout=15)
+        resp.raise_for_status()
+        detail = parse_detail_page(resp.text, detail_url)
+        if detail.get("application_procedure_url"):
+            detail["application_form_link"] = get_external_application_link(detail["application_procedure_url"])
+        else:
+            detail["application_form_link"] = ""
+        event.update(detail)
+    except Exception as e:
+        print(f"Errore dettaglio {detail_url}: {e}")
+        for key in ["participants_no","participants_from","recommended_for","accessibility",
+                    "working_language","organiser","participation_fee","accommodation_food",
+                    "travel_reimbursement","infopack_downloads","application_procedure_url",
+                    "application_form_link","training_overview","application_deadline"]:
+            event[key] = ""
+
 
 def scrape_events():
     global scraped_data
@@ -328,32 +352,13 @@ def scrape_events():
     scraped_data = list(events_dict.values())
     socketio.emit("log", {"message": f"Totale eventi trovati: {len(scraped_data)}"})
 
-    # Dettaglio
-    for i, event in enumerate(scraped_data, start=1):
-        detail_url = event.get("detail_url", "")
-        if not detail_url:
-            continue
-        msg = f"[{i}/{len(scraped_data)}] {event['title']}"
-        socketio.emit("log", {"message": msg})
-        print(msg)
-
-        try:
-            resp = session.get(detail_url, timeout=15)
-            resp.raise_for_status()
-            detail = parse_detail_page(resp.text, detail_url)
-            if detail.get("application_procedure_url"):
-                detail["application_form_link"] = get_external_application_link(detail["application_procedure_url"])
-            else:
-                detail["application_form_link"] = ""
-            event.update(detail)
-        except Exception as e:
-            print(f"Errore dettaglio {detail_url}: {e}")
-            for key in ["participants_no","participants_from","recommended_for","accessibility",
-                        "working_language","organiser","participation_fee","accommodation_food",
-                        "travel_reimbursement","infopack_downloads","application_procedure_url",
-                        "application_form_link","training_overview","application_deadline"]:
-                event[key] = ""
-        time.sleep(1)
+    # ================= Parallel detail scraping =================
+    pool_size = 10
+    pool = Pool(pool_size)
+    total_events = len(scraped_data)
+    jobs = [pool.spawn(process_event_detail, event, session, idx+1, total_events)
+            for idx, event in enumerate(scraped_data)]
+    pool.join()
 
     save_csv_to_file()
     socketio.emit("log", {"message": f"Scraping completato! Totale: {len(scraped_data)} eventi"})
