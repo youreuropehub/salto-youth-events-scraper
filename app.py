@@ -1,4 +1,4 @@
-# ================== GEVENT PATCH (OBBLIGATORIO) ==================
+# ================== GEVENT PATCH ==================
 from gevent import monkey
 monkey.patch_all()
 
@@ -10,7 +10,7 @@ from io import StringIO, BytesIO
 from datetime import date
 
 import requests
-from flask import Flask, render_template, jsonify, send_file
+from flask import Flask, render_template, send_file
 from flask_socketio import SocketIO, emit
 from bs4 import BeautifulSoup
 
@@ -49,19 +49,20 @@ def build_search_url(offset: int) -> str:
     )
 
 
-def extract_application_deadline(soup: BeautifulSoup) -> str:
+def extract_application_deadline(soup):
     text = soup.get_text(" ", strip=True)
     m = re.search(
         r"Application deadline\s*(?:\(24h UTC\))?\s*:\s*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4})",
         text
     )
-    return m.group(1).strip() if m else ""
+    return m.group(1) if m else ""
 
 
 # ================== PARSING ==================
 def parse_list_page(html):
     soup = BeautifulSoup(html, "html.parser")
     events = {}
+
     for a in soup.select("a[href*='/tools/european-training-calendar/training/']"):
         title = a.get_text(strip=True)
         if not title:
@@ -92,6 +93,7 @@ def parse_list_page(html):
             "application_form_link": "",
             "detail_url": url
         })
+
     return list(events.values())
 
 
@@ -107,7 +109,7 @@ def parse_detail_page(html):
             if sib.name and sib.name.startswith("h"):
                 break
             parts.append(sib.get_text(" ", strip=True))
-        return " ".join(parts).strip()
+        return " ".join(parts)
 
     return {
         "training_overview": section("Training overview"),
@@ -115,36 +117,22 @@ def parse_detail_page(html):
         "participation_fee": section("Participation fee"),
         "accommodation_food": section("Accommodation and food"),
         "travel_reimbursement": section("Travel reimbursement"),
-        "application_deadline": extract_application_deadline(soup),
+        "application_deadline": extract_application_deadline(soup)
     }
 
 
-def get_external_application_link(url):
-    if not url:
-        return ""
-    try:
-        r = requests.get(url, timeout=10)
-        soup = BeautifulSoup(r.text, "html.parser")
-        for a in soup.find_all("a", href=True):
-            if any(x in a["href"] for x in [
-                "forms.gle", "google.com/forms",
-                "typeform.com", "surveymonkey.com", "jotform.com"
-            ]):
-                return a["href"]
-    except Exception:
-        pass
-    return ""
+# ================== LOG EVENTO ==================
+def log_event_fields(event):
+    lines = ["----- EVENTO -----"]
+    for k, v in event.items():
+        lines.append(f"{k}: {v}")
+    lines.append("------------------")
+
+    socketio.emit("log", {"message": "\n".join(lines)})
+    sleep(0)
 
 
 # ================== SCRAPING ==================
-def log_event_fields(event):
-    socketio.emit("log", {"message": "----- EVENTO -----"})
-    for k, v in event.items():
-        socketio.emit("log", {"message": f"{k}: {v}"})
-        sleep(0)
-    socketio.emit("log", {"message": "------------------"})
-
-
 def scrape_events():
     global scraped_data
     scraped_data = []
@@ -159,11 +147,8 @@ def scrape_events():
         socketio.emit("log", {"message": f"Caricamento pagina {page + 1}"})
         sleep(0)
 
-        try:
-            r = session.get(build_search_url(page * 10), timeout=20)
-            r.raise_for_status()
-        except Exception as e:
-            socketio.emit("log", {"message": f"Errore pagina: {e}"})
+        r = session.get(build_search_url(page * 10), timeout=20)
+        if r.status_code != 200:
             break
 
         events = parse_list_page(r.text)
@@ -177,7 +162,7 @@ def scrape_events():
         sleep(1)
 
     scraped_data = list(events_map.values())
-    socketio.emit("log", {"message": f"Totale eventi trovati: {len(scraped_data)}"})
+    socketio.emit("log", {"message": f"Totale eventi: {len(scraped_data)}"})
 
     for i, ev in enumerate(scraped_data, 1):
         socketio.emit("log", {"message": f"[{i}/{len(scraped_data)}] {ev['title']}"})
@@ -185,10 +170,9 @@ def scrape_events():
 
         try:
             r = session.get(ev["detail_url"], timeout=20)
-            r.raise_for_status()
             ev.update(parse_detail_page(r.text))
-        except Exception as e:
-            socketio.emit("log", {"message": f"Errore dettaglio: {e}"})
+        except Exception:
+            pass
 
         log_event_fields(ev)
         sleep(1)
@@ -229,6 +213,7 @@ def download_csv():
 
     bio = BytesIO(buffer.getvalue().encode("utf-8"))
     bio.seek(0)
+
     return send_file(
         bio,
         as_attachment=True,
@@ -237,5 +222,12 @@ def download_csv():
     )
 
 
+# ================== MAIN ==================
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    socketio.run(
+        app,
+        host="0.0.0.0",
+        port=5000,
+        debug=False,
+        use_reloader=False
+    )
