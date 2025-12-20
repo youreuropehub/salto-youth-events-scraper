@@ -5,6 +5,7 @@ monkey.patch_all()
 import os
 import csv
 import re
+import time
 from io import StringIO, BytesIO
 from datetime import date
 from flask import Flask, render_template, jsonify, send_file
@@ -60,10 +61,29 @@ def build_search_url(offset: int) -> str:
 
 
 def extract_application_deadline(soup: BeautifulSoup) -> str:
-    text = soup.get_text("\n", strip=True)
-    match = re.search(r"Application deadline\s*[:\n]?\s*(\d{1,2}/\d{1,2}/\d{4})", text)
+    """
+    Estrae correttamente la data di Application deadline dal blocco
+    con class 'mrgn-btm-22' o, in fallback, dall'intera pagina.
+    """
+    # 1) Cerca negli elementi con class 'mrgn-btm'
+    for tag in soup.find_all(class_=re.compile(r"mrgn-btm")):
+        text = tag.get_text(" ", strip=True)
+        match = re.search(
+            r"Application deadline\s*(?:\(24h UTC\))?\s*[:]\s*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4})",
+            text
+        )
+        if match:
+            return match.group(1).strip()
+
+    # 2) Fallback: cerca nel testo completo della pagina
+    full_text = soup.get_text(" ", strip=True)
+    match = re.search(
+        r"Application deadline\s*(?:\(24h UTC\))?\s*[:]\s*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4})",
+        full_text
+    )
     if match:
-        return match.group(1)
+        return match.group(1).strip()
+
     return ""
 
 
@@ -102,19 +122,13 @@ def parse_list_page(html):
         dates = lines[idx + 1] if idx + 1 < len(lines) else ""
         location = lines[idx + 2] if idx + 2 < len(lines) else ""
 
-        app_deadline = ""
-        for i, line in enumerate(lines):
-            if "Application deadline" in line:
-                if i + 1 < len(lines):
-                    app_deadline = lines[i + 1].strip()
-                break
-
+        # app_deadline verrà sovrascritta dal dettaglio
         events.append({
             "title": title,
             "type": type_,
             "dates": dates,
             "location": location,
-            "application_deadline": app_deadline,
+            "application_deadline": "",
             "detail_url": detail_url,
         })
 
@@ -399,7 +413,6 @@ def download_csv():
 
     bytes_buffer = BytesIO(text_buffer.getvalue().encode("utf-8"))
     bytes_buffer.seek(0)
-
     return send_file(bytes_buffer, mimetype="text/csv; charset=utf-8",
                      as_attachment=True, download_name="salto_events_complete.csv")
 
