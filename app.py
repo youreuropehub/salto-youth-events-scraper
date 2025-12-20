@@ -46,33 +46,27 @@ def build_search_url(offset: int) -> str:
     )
     return base.format(offset=offset, day=day, month=month, year=year)
 
-def extract_application_deadline_and_selection(soup: BeautifulSoup):
-    """
-    Estrae Application deadline e Date of selection dal testo del link 'Apply now!'
-    dentro il div di classe mrgn-btm-22.
-    """
+def extract_dates_from_mrgn_btm_22(soup: BeautifulSoup):
+    """Estrae application_deadline e date_of_selection dai span call-addendum."""
     app_deadline = ""
     date_of_selection = ""
 
-    link = soup.find("a", string=re.compile(r"Apply now", re.IGNORECASE))
-    if link:
-        text = link.get_text(" ", strip=True)
-        # Application deadline
-        match_deadline = re.search(
-            r"Application deadline\s*(?:\([^)]+\)\s*)?[:\s]*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4}|\d{1,2}/\d{1,2}/\d{4})",
-            text
-        )
-        if match_deadline:
-            app_deadline = match_deadline.group(1).strip()
-        # Date of selection
-        match_selection = re.search(
-            r"Date of selection\s*[:\s]*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4}|\d{1,2}/\d{1,2}/\d{4})",
-            text
-        )
-        if match_selection:
-            date_of_selection = match_selection.group(1).strip()
-
-    return normalize_text(app_deadline), normalize_text(date_of_selection)
+    div = soup.find("div", class_="mrgn-btm-22")
+    if div:
+        spans = div.find_all("span", class_="block call-addendum")
+        for span in spans:
+            text = span.get_text(" ", strip=True)
+            if "Application deadline" in text:
+                match = re.search(r"Application deadline.*?:\s*(.+)$", text)
+                if match:
+                    app_deadline = match.group(1).strip()
+            elif "Date of selection" in text:
+                match = re.search(r"Date of selection.*?:\s*(.+)$", text)
+                if match:
+                    date_of_selection = match.group(1).strip()
+    else:
+        print("DEBUG: div.mrgn-btm-22 non trovato")
+    return app_deadline, date_of_selection
 
 # ================= PARSING =================
 
@@ -147,9 +141,7 @@ def parse_detail_page(html: str, detail_url: str):
     if desc_div:
         training_description = normalize_text(desc_div.get_text("\n", strip=True))
 
-    # ---------- Extract Application deadline and Date of selection ----------
-    application_deadline, date_of_selection = extract_application_deadline_and_selection(soup)
-
+    # ---------- Participants, organiser, language ----------
     participants_no = participants_from = recommended_for = working_lang = organiser = ""
     lines = [l.strip() for l in training_overview.splitlines() if l.strip()]
     i = 0
@@ -231,6 +223,9 @@ def parse_detail_page(html: str, detail_url: str):
             application_procedure_url = app_href
             break
 
+    # ---------- Application deadline & Date of selection ----------
+    application_deadline, date_of_selection = extract_dates_from_mrgn_btm_22(soup)
+
     return {
         "participants_no": participants_no,
         "participants_from": participants_from,
@@ -249,8 +244,6 @@ def parse_detail_page(html: str, detail_url: str):
         "application_deadline": application_deadline,
         "date_of_selection": date_of_selection,
     }
-
-# ================= EXTERNAL APPLICATION LINK =================
 
 def get_external_application_link(application_procedure_url: str) -> str:
     if not application_procedure_url:
@@ -281,8 +274,8 @@ def save_csv_to_file():
     csv_path = os.path.join(OUTPUT_DIR, "salto_events_complete.csv")
 
     fieldnames = [
-        "title","type","dates","location","application_deadline","date_of_selection","training_overview",
-        "training_summary","training_description",
+        "title","type","dates","location","application_deadline","date_of_selection",
+        "training_overview","training_summary","training_description",
         "participants_no","participants_from","recommended_for","accessibility",
         "working_language","organiser","participation_fee","accommodation_food",
         "travel_reimbursement",
@@ -396,8 +389,8 @@ def download_csv():
 
     text_buffer = StringIO()
     fieldnames = [
-        "title","type","dates","location","application_deadline","date_of_selection","training_overview",
-        "training_summary","training_description",
+        "title","type","dates","location","application_deadline","date_of_selection",
+        "training_overview","training_summary","training_description",
         "participants_no","participants_from","recommended_for","accessibility",
         "working_language","organiser","participation_fee","accommodation_food",
         "travel_reimbursement",
@@ -432,8 +425,8 @@ def api_scrape_and_download():
 
     text_buffer = StringIO()
     fieldnames = [
-        "title","type","dates","location","application_deadline","date_of_selection","training_overview",
-        "training_summary","training_description",
+        "title","type","dates","location","application_deadline","date_of_selection",
+        "training_overview","training_summary","training_description",
         "participants_no","participants_from","recommended_for","accessibility",
         "working_language","organiser","participation_fee","accommodation_food",
         "travel_reimbursement",
