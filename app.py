@@ -20,11 +20,13 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 BASE_URL = "https://www.salto-youth.net"
 OUTPUT_DIR = "output"
 
+# Variabile globale per memorizzare i risultati
 scraped_data = []
 
 # ================= UTILITY =================
 
 def normalize_text(text: str) -> str:
+    """Rimuove spazi multipli e line break inutili."""
     return re.sub(r"\s+", " ", text).strip()
 
 def build_search_url(offset: int) -> str:
@@ -45,23 +47,31 @@ def build_search_url(offset: int) -> str:
     return base.format(offset=offset, day=day, month=month, year=year)
 
 def extract_application_deadline_and_selection(soup: BeautifulSoup):
-    """Estrae Application deadline e Date of selection dal div.mrgn-btm-22."""
+    """
+    Estrae Application deadline e Date of selection dal testo del link 'Apply now!'
+    dentro il div di classe mrgn-btm-22.
+    """
     app_deadline = ""
     date_of_selection = ""
-    container = soup.find("div", class_="mrgn-btm-22")
-    if container:
-        spans = container.find_all("span", class_="block call-addendum")
-        for span in spans:
-            text = span.get_text(" ", strip=True)
-            if "Application deadline" in text:
-                text_clean = re.sub(r"\(.*?\)", "", text)
-                match = re.search(r"Application deadline\s*[:\s]*(.+)", text_clean)
-                if match:
-                    app_deadline = match.group(1).strip()
-            elif "Date of selection" in text:
-                match = re.search(r"Date of selection\s*[:\s]*(.+)", text)
-                if match:
-                    date_of_selection = match.group(1).strip()
+
+    link = soup.find("a", string=re.compile(r"Apply now", re.IGNORECASE))
+    if link:
+        text = link.get_text(" ", strip=True)
+        # Application deadline
+        match_deadline = re.search(
+            r"Application deadline\s*(?:\([^)]+\)\s*)?[:\s]*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4}|\d{1,2}/\d{1,2}/\d{4})",
+            text
+        )
+        if match_deadline:
+            app_deadline = match_deadline.group(1).strip()
+        # Date of selection
+        match_selection = re.search(
+            r"Date of selection\s*[:\s]*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4}|\d{1,2}/\d{1,2}/\d{4})",
+            text
+        )
+        if match_selection:
+            date_of_selection = match_selection.group(1).strip()
+
     return normalize_text(app_deadline), normalize_text(date_of_selection)
 
 # ================= PARSING =================
@@ -137,7 +147,9 @@ def parse_detail_page(html: str, detail_url: str):
     if desc_div:
         training_description = normalize_text(desc_div.get_text("\n", strip=True))
 
-    # ---------- Participants / Organiser ----------
+    # ---------- Extract Application deadline and Date of selection ----------
+    application_deadline, date_of_selection = extract_application_deadline_and_selection(soup)
+
     participants_no = participants_from = recommended_for = working_lang = organiser = ""
     lines = [l.strip() for l in training_overview.splitlines() if l.strip()]
     i = 0
@@ -219,9 +231,6 @@ def parse_detail_page(html: str, detail_url: str):
             application_procedure_url = app_href
             break
 
-    # ---------- Application deadline & Date of selection ----------
-    application_deadline, date_of_selection = extract_application_deadline_and_selection(soup)
-
     return {
         "participants_no": participants_no,
         "participants_from": participants_from,
@@ -240,6 +249,8 @@ def parse_detail_page(html: str, detail_url: str):
         "application_deadline": application_deadline,
         "date_of_selection": date_of_selection,
     }
+
+# ================= EXTERNAL APPLICATION LINK =================
 
 def get_external_application_link(application_procedure_url: str) -> str:
     if not application_procedure_url:
@@ -270,8 +281,8 @@ def save_csv_to_file():
     csv_path = os.path.join(OUTPUT_DIR, "salto_events_complete.csv")
 
     fieldnames = [
-        "title","type","dates","location","application_deadline","date_of_selection",
-        "training_overview","training_summary","training_description",
+        "title","type","dates","location","application_deadline","date_of_selection","training_overview",
+        "training_summary","training_description",
         "participants_no","participants_from","recommended_for","accessibility",
         "working_language","organiser","participation_fee","accommodation_food",
         "travel_reimbursement",
@@ -354,6 +365,7 @@ def scrape_events():
     scraped_data = list(events_dict.values())
     socketio.emit("log", {"message": f"Totale eventi trovati: {len(scraped_data)}"})
 
+    # Parallel detail scraping
     pool_size = 10
     pool = Pool(pool_size)
     total_events = len(scraped_data)
@@ -384,8 +396,8 @@ def download_csv():
 
     text_buffer = StringIO()
     fieldnames = [
-        "title","type","dates","location","application_deadline","date_of_selection",
-        "training_overview","training_summary","training_description",
+        "title","type","dates","location","application_deadline","date_of_selection","training_overview",
+        "training_summary","training_description",
         "participants_no","participants_from","recommended_for","accessibility",
         "working_language","organiser","participation_fee","accommodation_food",
         "travel_reimbursement",
@@ -420,8 +432,8 @@ def api_scrape_and_download():
 
     text_buffer = StringIO()
     fieldnames = [
-        "title","type","dates","location","application_deadline","date_of_selection",
-        "training_overview","training_summary","training_description",
+        "title","type","dates","location","application_deadline","date_of_selection","training_overview",
+        "training_summary","training_description",
         "participants_no","participants_from","recommended_for","accessibility",
         "working_language","organiser","participation_fee","accommodation_food",
         "travel_reimbursement",
