@@ -44,20 +44,25 @@ def build_search_url(offset: int) -> str:
     )
     return base.format(offset=offset, day=day, month=month, year=year)
 
-def extract_application_deadline(soup: BeautifulSoup) -> str:
-    """Estrae Application deadline solo da div.mrgn-btm-22"""
-    tag = soup.find(class_="mrgn-btm-22")
-    if tag:
-        text = tag.get_text(" ", strip=True)
-        # Prova formato DD/MM/YYYY
-        match = re.search(r"Application deadline\s*[:\s]*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})", text)
-        if match:
-            return match.group(1).strip()
-        # Prova formato D Month YYYY
-        match = re.search(r"Application deadline\s*[:\s]*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4})", text)
-        if match:
-            return match.group(1).strip()
-    return ""
+def extract_application_deadline_and_selection(soup: BeautifulSoup):
+    """Estrae Application deadline e Date of selection dal div.mrgn-btm-22."""
+    app_deadline = ""
+    date_of_selection = ""
+    container = soup.find("div", class_="mrgn-btm-22")
+    if container:
+        spans = container.find_all("span", class_="block call-addendum")
+        for span in spans:
+            text = span.get_text(" ", strip=True)
+            if "Application deadline" in text:
+                text_clean = re.sub(r"\(.*?\)", "", text)
+                match = re.search(r"Application deadline\s*[:\s]*(.+)", text_clean)
+                if match:
+                    app_deadline = match.group(1).strip()
+            elif "Date of selection" in text:
+                match = re.search(r"Date of selection\s*[:\s]*(.+)", text)
+                if match:
+                    date_of_selection = match.group(1).strip()
+    return normalize_text(app_deadline), normalize_text(date_of_selection)
 
 # ================= PARSING =================
 
@@ -99,7 +104,8 @@ def parse_list_page(html: str):
             "type": normalize_text(type_),
             "dates": normalize_text(dates),
             "location": normalize_text(location),
-            "application_deadline": "",  # dettagli verranno popolati in parse_detail_page
+            "application_deadline": "",
+            "date_of_selection": "",
             "detail_url": detail_url,
         })
 
@@ -131,6 +137,7 @@ def parse_detail_page(html: str, detail_url: str):
     if desc_div:
         training_description = normalize_text(desc_div.get_text("\n", strip=True))
 
+    # ---------- Participants / Organiser ----------
     participants_no = participants_from = recommended_for = working_lang = organiser = ""
     lines = [l.strip() for l in training_overview.splitlines() if l.strip()]
     i = 0
@@ -212,8 +219,8 @@ def parse_detail_page(html: str, detail_url: str):
             application_procedure_url = app_href
             break
 
-    # ---------- Application deadline (modifica applicata) ----------
-    application_deadline = extract_application_deadline(soup)
+    # ---------- Application deadline & Date of selection ----------
+    application_deadline, date_of_selection = extract_application_deadline_and_selection(soup)
 
     return {
         "participants_no": participants_no,
@@ -231,9 +238,8 @@ def parse_detail_page(html: str, detail_url: str):
         "training_summary": training_summary,
         "training_description": training_description,
         "application_deadline": application_deadline,
+        "date_of_selection": date_of_selection,
     }
-
-# ================= EXTERNAL APPLICATION LINK =================
 
 def get_external_application_link(application_procedure_url: str) -> str:
     if not application_procedure_url:
@@ -264,8 +270,8 @@ def save_csv_to_file():
     csv_path = os.path.join(OUTPUT_DIR, "salto_events_complete.csv")
 
     fieldnames = [
-        "title","type","dates","location","application_deadline","training_overview",
-        "training_summary","training_description",
+        "title","type","dates","location","application_deadline","date_of_selection",
+        "training_overview","training_summary","training_description",
         "participants_no","participants_from","recommended_for","accessibility",
         "working_language","organiser","participation_fee","accommodation_food",
         "travel_reimbursement",
@@ -306,7 +312,7 @@ def process_event_detail(event, session, idx, total):
                     "working_language","organiser","participation_fee","accommodation_food",
                     "travel_reimbursement","infopack_downloads","application_procedure_url",
                     "application_form_link","training_overview","training_summary",
-                    "training_description","application_deadline"]:
+                    "training_description","application_deadline","date_of_selection"]:
             event[key] = ""
 
 def scrape_events():
@@ -348,7 +354,6 @@ def scrape_events():
     scraped_data = list(events_dict.values())
     socketio.emit("log", {"message": f"Totale eventi trovati: {len(scraped_data)}"})
 
-    # Parallel detail scraping
     pool_size = 10
     pool = Pool(pool_size)
     total_events = len(scraped_data)
@@ -379,8 +384,8 @@ def download_csv():
 
     text_buffer = StringIO()
     fieldnames = [
-        "title","type","dates","location","application_deadline","training_overview",
-        "training_summary","training_description",
+        "title","type","dates","location","application_deadline","date_of_selection",
+        "training_overview","training_summary","training_description",
         "participants_no","participants_from","recommended_for","accessibility",
         "working_language","organiser","participation_fee","accommodation_food",
         "travel_reimbursement",
@@ -393,6 +398,7 @@ def download_csv():
 
     bytes_buffer = BytesIO(text_buffer.getvalue().encode("utf-8"))
     bytes_buffer.seek(0)
+
     return send_file(bytes_buffer, mimetype="text/csv; charset=utf-8",
                      as_attachment=True, download_name="salto_events_complete.csv")
 
@@ -414,8 +420,8 @@ def api_scrape_and_download():
 
     text_buffer = StringIO()
     fieldnames = [
-        "title","type","dates","location","application_deadline","training_overview",
-        "training_summary","training_description",
+        "title","type","dates","location","application_deadline","date_of_selection",
+        "training_overview","training_summary","training_description",
         "participants_no","participants_from","recommended_for","accessibility",
         "working_language","organiser","participation_fee","accommodation_food",
         "travel_reimbursement",
