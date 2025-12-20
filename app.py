@@ -20,13 +20,11 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 BASE_URL = "https://www.salto-youth.net"
 OUTPUT_DIR = "output"
 
-# Variabile globale per memorizzare i risultati
 scraped_data = []
 
 # ================= UTILITY =================
 
 def normalize_text(text: str) -> str:
-    """Rimuove spazi multipli e line break inutili."""
     return re.sub(r"\s+", " ", text).strip()
 
 def build_search_url(offset: int) -> str:
@@ -47,10 +45,19 @@ def build_search_url(offset: int) -> str:
     return base.format(offset=offset, day=day, month=month, year=year)
 
 def extract_application_deadline(soup: BeautifulSoup) -> str:
-    """Cerca la data di scadenza dall'HTML."""
-    text = soup.get_text("\n", strip=True)
-    match = re.search(r"Application deadline\s*[:\n]?\s*(\d{1,2}/\d{1,2}/\d{4})", text)
-    return match.group(1) if match else ""
+    """Estrae Application deadline solo da div.mrgn-btm-22"""
+    tag = soup.find(class_="mrgn-btm-22")
+    if tag:
+        text = tag.get_text(" ", strip=True)
+        # Prova formato DD/MM/YYYY
+        match = re.search(r"Application deadline\s*[:\s]*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})", text)
+        if match:
+            return match.group(1).strip()
+        # Prova formato D Month YYYY
+        match = re.search(r"Application deadline\s*[:\s]*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4})", text)
+        if match:
+            return match.group(1).strip()
+    return ""
 
 # ================= PARSING =================
 
@@ -87,19 +94,12 @@ def parse_list_page(html: str):
         dates = lines[idx + 1] if idx + 1 < len(lines) else ""
         location = lines[idx + 2] if idx + 2 < len(lines) else ""
 
-        app_deadline = ""
-        for i, line in enumerate(lines):
-            if "Application deadline" in line:
-                if i + 1 < len(lines):
-                    app_deadline = lines[i + 1].strip()
-                break
-
         events.append({
             "title": normalize_text(title),
             "type": normalize_text(type_),
             "dates": normalize_text(dates),
             "location": normalize_text(location),
-            "application_deadline": normalize_text(app_deadline),
+            "application_deadline": "",  # dettagli verranno popolati in parse_detail_page
             "detail_url": detail_url,
         })
 
@@ -212,7 +212,7 @@ def parse_detail_page(html: str, detail_url: str):
             application_procedure_url = app_href
             break
 
-    # ---------- Application deadline ----------
+    # ---------- Application deadline (modifica applicata) ----------
     application_deadline = extract_application_deadline(soup)
 
     return {
@@ -232,6 +232,8 @@ def parse_detail_page(html: str, detail_url: str):
         "training_description": training_description,
         "application_deadline": application_deadline,
     }
+
+# ================= EXTERNAL APPLICATION LINK =================
 
 def get_external_application_link(application_procedure_url: str) -> str:
     if not application_procedure_url:
@@ -391,7 +393,6 @@ def download_csv():
 
     bytes_buffer = BytesIO(text_buffer.getvalue().encode("utf-8"))
     bytes_buffer.seek(0)
-
     return send_file(bytes_buffer, mimetype="text/csv; charset=utf-8",
                      as_attachment=True, download_name="salto_events_complete.csv")
 
