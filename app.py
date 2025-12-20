@@ -345,3 +345,12 @@ def download_csv():
     writer.writerows(scraped_data)
 
     return send_file(
+        BytesIO(buf.getvalue().encode("utf-8")),
+        mimetype="text/csv; charset=utf-8",
+        as_attachment=True,
+        download_name="salto_events_complete.csv"
+    )
+
+
+if __name__ == "__main__":
+    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
