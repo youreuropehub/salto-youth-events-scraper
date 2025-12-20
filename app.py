@@ -11,10 +11,13 @@ from flask import Flask, render_template, jsonify, send_file
 from flask_socketio import SocketIO, emit
 from bs4 import BeautifulSoup
 import requests
+import eventlet
+
+eventlet.monkey_patch()
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 BASE_URL = "https://www.salto-youth.net"
 OUTPUT_DIR = "output"
@@ -234,7 +237,7 @@ def get_external_application_link(application_procedure_url):
     if not application_procedure_url:
         return ""
     try:
-        socketio.sleep(0)  # cede controllo all'event loop
+        eventlet.sleep(0)  # lascia che il server gestisca ping
         resp = requests.get(application_procedure_url, timeout=10)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -275,7 +278,6 @@ def save_csv_to_file():
 
     print(f"DEBUG: CSV salvato in {csv_path}")
     socketio.emit("log", {"message": f"CSV salvato in {csv_path}"})
-    socketio.sleep(0)
 
 
 # ================= SCRAPING =================
@@ -295,11 +297,8 @@ def scrape_events():
         offset = page * page_size
         msg = f"Caricamento pagina {page + 1} (offset={offset})..."
         socketio.emit("log", {"message": msg})
-        socketio.sleep(0)
-        print(msg)
-
+        eventlet.sleep(0)
         try:
-            socketio.sleep(0)
             url = build_search_url(offset)
             resp = session.get(url, timeout=15)
             resp.raise_for_status()
@@ -317,44 +316,45 @@ def scrape_events():
                 events_dict[detail_url] = event
 
         page += 1
-        socketio.sleep(0.2)
+        eventlet.sleep(0.1)
 
     scraped_data = list(events_dict.values())
     socketio.emit("log", {"message": f"Totale eventi trovati: {len(scraped_data)}"})
-    socketio.sleep(0)
+    eventlet.sleep(0)
 
-    for i, event in enumerate(scraped_data, start=1):
-        detail_url = event.get("detail_url", "")
-        if not detail_url:
-            continue
-        msg = f"[{i}/{len(scraped_data)}] {event['title']}"
-        socketio.emit("log", {"message": msg})
-        socketio.sleep(0)
-        print(msg)
-
-        try:
-            socketio.sleep(0)
-            resp = session.get(detail_url, timeout=15)
-            resp.raise_for_status()
-            detail = parse_detail_page(resp.text, detail_url)
-            if detail.get("application_procedure_url"):
-                detail["application_form_link"] = get_external_application_link(detail["application_procedure_url"])
-            else:
-                detail["application_form_link"] = ""
-            event.update(detail)
-        except Exception as e:
-            print(f"Errore dettaglio {detail_url}: {e}")
-            for key in ["participants_no","participants_from","recommended_for","accessibility",
-                        "working_language","organiser","participation_fee","accommodation_food",
-                        "travel_reimbursement","infopack_downloads","application_procedure_url",
-                        "application_form_link","training_overview","application_deadline"]:
-                event[key] = ""
-        socketio.sleep(0.2)
+    # batch di dettagli per evitare blocco WebSocket
+    batch_size = 5
+    for i in range(0, len(scraped_data), batch_size):
+        batch = scraped_data[i:i+batch_size]
+        for idx, event in enumerate(batch, start=i+1):
+            detail_url = event.get("detail_url", "")
+            if not detail_url:
+                continue
+            msg = f"[{idx}/{len(scraped_data)}] {event['title']}"
+            socketio.emit("log", {"message": msg})
+            eventlet.sleep(0)
+            try:
+                resp = session.get(detail_url, timeout=15)
+                resp.raise_for_status()
+                detail = parse_detail_page(resp.text, detail_url)
+                if detail.get("application_procedure_url"):
+                    detail["application_form_link"] = get_external_application_link(detail["application_procedure_url"])
+                else:
+                    detail["application_form_link"] = ""
+                event.update(detail)
+            except Exception as e:
+                print(f"Errore dettaglio {detail_url}: {e}")
+                for key in ["participants_no","participants_from","recommended_for","accessibility",
+                            "working_language","organiser","participation_fee","accommodation_food",
+                            "travel_reimbursement","infopack_downloads","application_procedure_url",
+                            "application_form_link","training_overview","application_deadline"]:
+                    event[key] = ""
+            eventlet.sleep(0.1)
 
     save_csv_to_file()
     socketio.emit("log", {"message": f"Scraping completato! Totale: {len(scraped_data)} eventi"})
     socketio.emit("scraping_done", {"count": len(scraped_data)})
-    socketio.sleep(0)
+    eventlet.sleep(0)
     print(f"DEBUG: scraping completato! Totale eventi unici: {len(scraped_data)}")
 
 
@@ -415,6 +415,5 @@ def api_scrape_and_download():
 
 
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 5000))
-    socketio.run(app, host="0.0.0.0", port=port)
+    socketio.run(app, host="0.0.0.0", port=port, debug=False, use_reloader=False)
