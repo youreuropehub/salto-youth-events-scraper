@@ -3,7 +3,6 @@ from gevent import monkey
 monkey.patch_all()
 
 import os
-import time
 import csv
 import re
 from io import StringIO, BytesIO
@@ -12,6 +11,7 @@ from flask import Flask, render_template, jsonify, send_file
 from flask_socketio import SocketIO, emit
 from bs4 import BeautifulSoup
 import requests
+from gevent.pool import Pool
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
@@ -23,8 +23,11 @@ OUTPUT_DIR = "output"
 # Variabile globale per memorizzare i risultati
 scraped_data = []
 
-
 # ================= UTILITY =================
+
+def normalize_text(text: str) -> str:
+    """Rimuove spazi multipli e line break inutili."""
+    return re.sub(r"\s+", " ", text).strip()
 
 def build_search_url(offset: int) -> str:
     today = date.today()
@@ -37,54 +40,21 @@ def build_search_url(offset: int) -> str:
         "&b_begin_date_after_day={day}"
         "&b_begin_date_after_month={month}"
         "&b_begin_date_after_year={year}"
-        "&b_begin_date_before_day="
-        "&b_begin_date_before_month="
-        "&b_begin_date_before_year="
-        "&b_end_date_after_day="
-        "&b_end_date_after_month="
-        "&b_end_date_after_year="
-        "&b_end_date_before_day="
-        "&b_end_date_before_month="
-        "&b_end_date_before_year="
-        "&b_activity_type="
-        "&b_country="
-        "&b_participating_countries="
         "&b_application_deadline_after_day={day}"
         "&b_application_deadline_after_month={month}"
         "&b_application_deadline_after_year={year}"
-        "&b_application_deadline_before_day="
-        "&b_application_deadline_before_month="
-        "&b_application_deadline_before_year="
     )
     return base.format(offset=offset, day=day, month=month, year=year)
 
-
 def extract_application_deadline(soup: BeautifulSoup) -> str:
-    """
-    Estrae la data di Application deadline dal blocco con class 'mrgn-btm-22'
-    o come fallback dall'intero testo della pagina.
-    """
-    for tag in soup.find_all(class_=re.compile(r"mrgn-btm")):
-        text = tag.get_text(" ", strip=True)
-        match = re.search(
-            r"Application deadline\s*[:]\s*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4})",
-            text
-        )
-        if match:
-            return match.group(1).strip()
-    full_text = soup.get_text(" ", strip=True)
-    match = re.search(
-        r"Application deadline\s*[:]\s*([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4})",
-        full_text
-    )
-    if match:
-        return match.group(1).strip()
-    return ""
-
+    """Cerca la data di scadenza dall'HTML."""
+    text = soup.get_text("\n", strip=True)
+    match = re.search(r"Application deadline\s*[:\n]?\s*(\d{1,2}/\d{1,2}/\d{4})", text)
+    return match.group(1) if match else ""
 
 # ================= PARSING =================
 
-def parse_list_page(html):
+def parse_list_page(html: str):
     soup = BeautifulSoup(html, "html.parser")
     seen_urls = set()
     events = []
@@ -117,49 +87,52 @@ def parse_list_page(html):
         dates = lines[idx + 1] if idx + 1 < len(lines) else ""
         location = lines[idx + 2] if idx + 2 < len(lines) else ""
 
+        app_deadline = ""
+        for i, line in enumerate(lines):
+            if "Application deadline" in line:
+                if i + 1 < len(lines):
+                    app_deadline = lines[i + 1].strip()
+                break
+
         events.append({
-            "title": title,
-            "type": type_,
-            "dates": dates,
-            "location": location,
-            "application_deadline": "",
+            "title": normalize_text(title),
+            "type": normalize_text(type_),
+            "dates": normalize_text(dates),
+            "location": normalize_text(location),
+            "application_deadline": normalize_text(app_deadline),
             "detail_url": detail_url,
         })
 
     return events
 
-
-def parse_detail_page(html, detail_url):
+def parse_detail_page(html: str, detail_url: str):
     soup = BeautifulSoup(html, "html.parser")
 
-    # ---------- Training overview ----------
+    # ---------- Training Overview ----------
     training_overview = ""
-    h3_overview = soup.find(
-        lambda tag: tag.name in ["h3", "h4"] and "Training overview" in tag.get_text()
-    )
+    h3_overview = soup.find(lambda tag: tag.name in ["h3", "h4"] and "Training overview" in tag.get_text())
     if h3_overview:
         parts = []
         for sib in h3_overview.find_next_siblings():
             if sib.name and sib.name.startswith("h"):
                 break
             parts.append(sib.get_text("\n", strip=True))
-        training_overview = "\n".join(parts).strip()
+        training_overview = normalize_text("\n".join(parts))
 
-    # ---------- Training summary (class mrgn-btm-44 wysiwyg) ----------
+    # ---------- Training Summary ----------
     training_summary = ""
-    summary_tag = soup.find(class_=re.compile(r"mrgn-btm-44\s+wysiwyg"))
-    if summary_tag:
-        training_summary = summary_tag.get_text("\n", strip=True)
+    summary_div = soup.find("div", class_="mrgn-btm-44 wysiwyg")
+    if summary_div:
+        training_summary = normalize_text(summary_div.get_text("\n", strip=True))
 
-    # ---------- Training description (class training-description running-text wysiwyg mrgn-btm-33) ----------
+    # ---------- Training Description ----------
     training_description = ""
-    desc_tag = soup.find(class_=re.compile(r"training-description\s+running-text\s+wysiwyg\s+mrgn-btm-33"))
-    if desc_tag:
-        training_description = desc_tag.get_text("\n", strip=True)
+    desc_div = soup.find("div", class_="training-description running-text wysiwyg mrgn-btm-33")
+    if desc_div:
+        training_description = normalize_text(desc_div.get_text("\n", strip=True))
 
     participants_no = participants_from = recommended_for = working_lang = organiser = ""
     lines = [l.strip() for l in training_overview.splitlines() if l.strip()]
-
     i = 0
     while i < len(lines):
         line = lines[i].lower()
@@ -185,19 +158,17 @@ def parse_detail_page(html, detail_url):
 
     # ---------- Accessibility ----------
     accessibility = ""
-    h_acc = soup.find(
-        lambda tag: tag.name in ["h3", "h4"] and "Accessibility info" in tag.get_text()
-    )
+    h_acc = soup.find(lambda tag: tag.name in ["h3", "h4"] and "Accessibility info" in tag.get_text())
     if h_acc:
         parts = []
         for sib in h_acc.find_next_siblings():
             if sib.name and sib.name.startswith("h"):
                 break
             parts.append(sib.get_text(" ", strip=True))
-        accessibility = " ".join(parts).strip()
+        accessibility = normalize_text(" ".join(parts))
 
-    # ---------- Costs section ----------
-    def section_after_heading(text):
+    # ---------- Costs ----------
+    def section_after_heading(text: str):
         h = soup.find(lambda tag: tag.name in ["h3", "h4"] and text in tag.get_text())
         if not h:
             return ""
@@ -206,13 +177,13 @@ def parse_detail_page(html, detail_url):
             if sib.name and sib.name.startswith("h"):
                 break
             parts.append(sib.get_text(" ", strip=True))
-        return " ".join(parts).strip()
+        return normalize_text(" ".join(parts))
 
     participation_fee = section_after_heading("Participation fee")
     accommodation_food = section_after_heading("Accommodation and food")
     travel_reimbursement = section_after_heading("Travel reimbursement")
 
-    # ---------- Downloads (infopack) ----------
+    # ---------- Downloads ----------
     infopack_downloads = ""
     downloads_heading = None
     for tag in soup.find_all(['h3', 'h4', 'h5', 'strong', 'b', 'p']):
@@ -262,9 +233,7 @@ def parse_detail_page(html, detail_url):
         "application_deadline": application_deadline,
     }
 
-# ================= EXTERNAL APPLICATION LINK =================
-
-def get_external_application_link(application_procedure_url):
+def get_external_application_link(application_procedure_url: str) -> str:
     if not application_procedure_url:
         return ""
     try:
@@ -275,13 +244,12 @@ def get_external_application_link(application_procedure_url):
         if external_link and external_link.get("href"):
             return external_link["href"]
         for a in soup.find_all("a", href=True):
-            if any(domain in a["href"] for domain in ["forms.gle","google.com/forms","typeform.com","jotform.com"]):
+            if any(domain in a["href"] for domain in ["forms.gle","google.com/forms","typeform.com","surveymonkey.com","jotform.com"]):
                 return a["href"]
         return ""
     except Exception as e:
         print(f"Error fetching application link from {application_procedure_url}: {e}")
         return ""
-
 
 # ================= CSV =================
 
@@ -310,8 +278,34 @@ def save_csv_to_file():
     print(f"DEBUG: CSV salvato in {csv_path}")
     socketio.emit("log", {"message": f"CSV salvato in {csv_path}"})
 
+# ================= PARALLEL SCRAPING =================
 
-# ================= SCRAPING =================
+def process_event_detail(event, session, idx, total):
+    detail_url = event.get("detail_url", "")
+    if not detail_url:
+        return
+
+    msg = f"[{idx}/{total}] {event['title']}"
+    socketio.emit("log", {"message": msg})
+    print(msg)
+
+    try:
+        resp = session.get(detail_url, timeout=15)
+        resp.raise_for_status()
+        detail = parse_detail_page(resp.text, detail_url)
+        if detail.get("application_procedure_url"):
+            detail["application_form_link"] = get_external_application_link(detail["application_procedure_url"])
+        else:
+            detail["application_form_link"] = ""
+        event.update(detail)
+    except Exception as e:
+        print(f"Errore dettaglio {detail_url}: {e}")
+        for key in ["participants_no","participants_from","recommended_for","accessibility",
+                    "working_language","organiser","participation_fee","accommodation_food",
+                    "travel_reimbursement","infopack_downloads","application_procedure_url",
+                    "application_form_link","training_overview","training_summary",
+                    "training_description","application_deadline"]:
+            event[key] = ""
 
 def scrape_events():
     global scraped_data
@@ -348,43 +342,22 @@ def scrape_events():
                 events_dict[detail_url] = event
 
         page += 1
-        time.sleep(1)
 
     scraped_data = list(events_dict.values())
     socketio.emit("log", {"message": f"Totale eventi trovati: {len(scraped_data)}"})
 
-    # Dettaglio
-    for i, event in enumerate(scraped_data, start=1):
-        detail_url = event.get("detail_url", "")
-        if not detail_url:
-            continue
-        msg = f"[{i}/{len(scraped_data)}] {event['title']}"
-        socketio.emit("log", {"message": msg})
-        print(msg)
-
-        try:
-            resp = session.get(detail_url, timeout=15)
-            resp.raise_for_status()
-            detail = parse_detail_page(resp.text, detail_url)
-            if detail.get("application_procedure_url"):
-                detail["application_form_link"] = get_external_application_link(detail["application_procedure_url"])
-            else:
-                detail["application_form_link"] = ""
-            event.update(detail)
-        except Exception as e:
-            print(f"Errore dettaglio {detail_url}: {e}")
-            for key in ["participants_no","participants_from","recommended_for","accessibility",
-                        "working_language","organiser","participation_fee","accommodation_food",
-                        "travel_reimbursement","infopack_downloads","application_procedure_url",
-                        "application_form_link","training_overview","training_summary","training_description","application_deadline"]:
-                event[key] = ""
-        time.sleep(1)
+    # Parallel detail scraping
+    pool_size = 10
+    pool = Pool(pool_size)
+    total_events = len(scraped_data)
+    jobs = [pool.spawn(process_event_detail, event, session, idx+1, total_events)
+            for idx, event in enumerate(scraped_data)]
+    pool.join()
 
     save_csv_to_file()
     socketio.emit("log", {"message": f"Scraping completato! Totale: {len(scraped_data)} eventi"})
     socketio.emit("scraping_done", {"count": len(scraped_data)})
     print(f"DEBUG: scraping completato! Totale eventi unici: {len(scraped_data)}")
-
 
 # ================= ROUTES =================
 
@@ -392,12 +365,10 @@ def scrape_events():
 def index():
     return render_template("index.html")
 
-
 @socketio.on("start_scraping")
 def handle_start_scraping():
     emit("log", {"message": "Avvio scraping..."})
     scrape_events()
-
 
 @app.route("/download_csv")
 def download_csv():
@@ -424,7 +395,6 @@ def download_csv():
     return send_file(bytes_buffer, mimetype="text/csv; charset=utf-8",
                      as_attachment=True, download_name="salto_events_complete.csv")
 
-
 @app.route("/api/scrape", methods=["POST", "GET"])
 def api_scrape():
     scrape_events()
@@ -434,7 +404,6 @@ def api_scrape():
         "csv_path": f"{OUTPUT_DIR}/salto_events_complete.csv",
         "message": "Scraping completato. CSV salvato."
     })
-
 
 @app.route("/api/scrape_and_download", methods=["POST", "GET"])
 def api_scrape_and_download():
@@ -460,7 +429,6 @@ def api_scrape_and_download():
     bytes_buffer.seek(0)
     return send_file(bytes_buffer, mimetype="text/csv; charset=utf-8",
                      as_attachment=True, download_name="salto_events_complete.csv")
-
 
 if __name__ == "__main__":
     socketio.run(app, debug=True, host="0.0.0.0", port=5000)
