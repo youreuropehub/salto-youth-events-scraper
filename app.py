@@ -6,7 +6,6 @@ import os
 import time
 import csv
 from io import StringIO, BytesIO
-from datetime import date
 from flask import Flask, render_template, send_file
 from flask_socketio import SocketIO, emit
 from bs4 import BeautifulSoup
@@ -23,21 +22,8 @@ scraped_data = []
 # ---------- Helper functions ----------
 
 def build_search_url(offset: int) -> str:
-    today = date.today()
-    day, month, year = today.day, today.month, today.year
-    # URL completo come nella versione funzionante precedente
-    return (
-        f"{BASE_URL}/tools/european-training-calendar/browse/"
-        f"?b_offset={offset}&b_limit=10&b_order=applicationDeadline"
-        f"&b_keyword="
-        f"&b_begin_date_after_day={day}&b_begin_date_after_month={month}&b_begin_date_after_year={year}"
-        f"&b_begin_date_before_day=&b_begin_date_before_month=&b_begin_date_before_year="
-        f"&b_end_date_after_day=&b_end_date_after_month=&b_end_date_after_year="
-        f"&b_end_date_before_day=&b_end_date_before_month=&b_end_date_before_year="
-        f"&b_activity_type=&b_country=&b_participating_countries="
-        f"&b_application_deadline_after_day={day}&b_application_deadline_after_month={month}&b_application_deadline_after_year={year}"
-        f"&b_application_deadline_before_day=&b_application_deadline_before_month=&b_application_deadline_before_year="
-    )
+    # URL senza filtri temporali per prendere tutti gli eventi
+    return f"{BASE_URL}/tools/european-training-calendar/browse/?b_offset={offset}&b_limit=10&b_order=applicationDeadline"
 
 def parse_list_page(html):
     soup = BeautifulSoup(html, "html.parser")
