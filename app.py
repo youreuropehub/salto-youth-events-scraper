@@ -1,195 +1,78 @@
-# IMPORTANTE: monkey patching di gevent PRIMA di qualsiasi altro import
-from gevent import monkey
-monkey.patch_all()
-
-import os
-import time
-import csv
-from io import StringIO, BytesIO
-from flask import Flask, render_template, send_file
-from flask_socketio import SocketIO, emit
-from datetime import date
-from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
-
-app = Flask(__name__)
-app.config["SECRET_KEY"] = "secret!"
-socketio = SocketIO(app, cors_allowed_origins="*")
-
-BASE_URL = "https://www.salto-youth.net"
-OUTPUT_DIR = "output"
-scraped_data = []
-
-# ---------- Playwright scraping ----------
-def scrape_events_playwright(max_pages=50):
+def scrape_events():
+    """Scraping ciclando tutte le pagine della lista eventi SALTO"""
     global scraped_data
     scraped_data = []
 
-    socketio.emit("log", {"message": f"Avvio scraping con Playwright..."})
-    print("DEBUG: Avvio scraping con Playwright...")
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page_size = 10
-        current_offset = 0
-        events_dict = {}
+    url = "https://www.salto-youth.net/tools/european-training-calendar/browse/"
+    events_dict = {}
+    page_num = 1
 
-        while current_offset < max_pages * page_size:
-            search_url = f"{BASE_URL}/tools/european-training-calendar/browse/?b_offset={current_offset}&b_limit={page_size}"
-            print(f"DEBUG: Caricamento pagina lista: {search_url}")
-            socketio.emit("log", {"message": f"Caricamento pagina offset={current_offset}"})
-            page.goto(search_url, timeout=60000)
-            time.sleep(2)  # attendi caricamento JS
+    while url:
+        socketio.emit("log", {"message": f"[DEBUG] Caricamento pagina {page_num}: {url}"})
+        try:
+            resp = session.get(url, timeout=15)
+            resp.raise_for_status()
+        except Exception as e:
+            socketio.emit("log", {"message": f"[ERROR] Pagina {page_num}: {e}"})
+            break
 
-            html = page.content()
-            soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(resp.text, "html.parser")
+        rows = soup.select(".search-results-list .tool-item")
 
-            # Trova tutti i blocchi evento
-            event_links = soup.select("a[href*='/tools/european-training-calendar/training/']")
-            if not event_links:
-                print("DEBUG: Nessun evento trovato, fine paginazione")
-                break
+        if not rows:
+            socketio.emit("log", {"message": f"[DEBUG] Nessun evento trovato a pagina {page_num}"})
+            break
 
-            for link in event_links:
-                title = link.get_text(strip=True)
-                detail_url = link.get("href")
-                if detail_url and not detail_url.startswith("http"):
-                    detail_url = BASE_URL + detail_url
+        for row in rows:
+            title_tag = row.select_one("h2 a")
+            title = title_tag.get_text(strip=True) if title_tag else ""
+            detail_url = title_tag.get("href") if title_tag else ""
+            if detail_url and not detail_url.startswith("http"):
+                detail_url = BASE_URL + detail_url
 
-                if detail_url in events_dict:
-                    continue
+            if detail_url in events_dict:
+                continue
 
-                block = link.find_parent()
-                for _ in range(4):
-                    if block and block.name not in ["body", "html"]:
-                        block = block.parent
+            type_ = row.select_one("span.h3.tool-item-category")
+            type_ = type_.get_text(strip=True) if type_ else ""
 
-                # Application deadline
-                app_deadline = ""
-                callout = block.select_one("div.callout-module")
-                if callout:
-                    p_tags = callout.find_all("p")
-                    for i, p in enumerate(p_tags):
-                        if "Application deadline" in p.get_text(strip=True):
-                            if i + 1 < len(p_tags):
-                                app_deadline = p_tags[i + 1].get_text(strip=True)
-                            break
+            dates = row.select_one("p.h5")
+            dates = dates.get_text(strip=True) if dates else ""
 
-                # Dates, type, location
-                lines = [l.strip() for l in block.get_text("\n", strip=True).split("\n") if l.strip()]
-                try:
-                    idx = lines.index(title)
-                except ValueError:
-                    idx = 0
-                type_ = lines[idx - 1] if idx - 1 >= 0 else ""
-                dates = lines[idx + 1] if idx + 1 < len(lines) else ""
-                location = lines[idx + 2] if idx + 2 < len(lines) else ""
+            location = row.select_one(".microcopy.mrgn-btm-17")
+            location = location.get_text(strip=True) if location else ""
 
-                events_dict[detail_url] = {
-                    "title": title,
-                    "type": type_,
-                    "dates": dates,
-                    "location": location,
-                    "application_deadline": app_deadline,
-                    "detail_url": detail_url,
-                }
-                print(f"DEBUG: Evento trovato: {title} - deadline: {app_deadline}")
+            # Application deadline
+            app_deadline = ""
+            callout = row.select_one("div.callout-module")
+            if callout:
+                p_tags = callout.find_all("p")
+                for i, p in enumerate(p_tags):
+                    if "Application deadline" in p.get_text(strip=True):
+                        if i + 1 < len(p_tags):
+                            app_deadline = p_tags[i + 1].get_text(strip=True)
+                        break
 
-            current_offset += page_size
-            time.sleep(1)
+            events_dict[detail_url] = {
+                "title": title,
+                "type": type_,
+                "dates": dates,
+                "location": location,
+                "application_deadline": app_deadline,
+                "detail_url": detail_url,
+            }
+            socketio.emit("log", {"message": f"[DEBUG] Evento trovato: {title}, deadline: {app_deadline}"})
 
-        # Visita ogni dettaglio
-        for i, event in enumerate(events_dict.values(), start=1):
-            detail_url = event["detail_url"]
-            socketio.emit("log", {"message": f"[{i}/{len(events_dict)}] Caricamento dettaglio: {event['title']}"})
-            print(f"DEBUG: [{i}/{len(events_dict)}] Caricamento dettaglio: {event['title']}")
-            page.goto(detail_url, timeout=60000)
-            time.sleep(2)
-            soup = BeautifulSoup(page.content(), "html.parser")
+        # Trova il link alla pagina successiva
+        next_page = soup.select_one(".search-result-list-navigation a.next-page")
+        url = BASE_URL + next_page.get("href") if next_page else None
+        page_num += 1
+        time.sleep(1)
 
-            # Training description
-            desc_div = soup.select_one("div.training-description")
-            training_description = desc_div.get_text("\n", strip=True) if desc_div else ""
+    scraped_data = list(events_dict.values())
+    socketio.emit("log", {"message": f"[DEBUG] Totale eventi raccolti dalla lista: {len(scraped_data)}"})
 
-            event.update({
-                "training_description": training_description,
-                "participants_no": "",
-                "participants_from": "",
-                "recommended_for": "",
-                "accessibility": "",
-                "working_language": "",
-                "organiser": "",
-                "participation_fee": "",
-                "accommodation_food": "",
-                "travel_reimbursement": "",
-                "infopack_downloads": "",
-                "application_procedure_url": "",
-                "application_form_link": "",
-            })
-
-            time.sleep(1)
-
-        browser.close()
-        scraped_data = list(events_dict.values())
-
-    socketio.emit("log", {"message": f"Scraping completato! Totale eventi: {len(scraped_data)}"})
-    print(f"DEBUG: Scraping completato! Totale eventi: {len(scraped_data)}")
-
-# ---------- CSV ----------
-def save_csv():
-    if not scraped_data:
-        print("DEBUG: Nessun dato da salvare")
-        return
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    csv_path = os.path.join(OUTPUT_DIR, "salto_events_complete.csv")
-    fieldnames = [
-        "title","type","dates","location","application_deadline",
-        "participants_no","participants_from","recommended_for",
-        "accessibility","working_language","organiser",
-        "participation_fee","accommodation_food","travel_reimbursement",
-        "infopack_downloads","application_procedure_url","application_form_link",
-        "training_description","detail_url"
-    ]
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(scraped_data)
-    print(f"DEBUG: CSV salvato in {csv_path}")
-    socketio.emit("log", {"message": f"CSV salvato in {csv_path}"})
-
-# ---------- Flask Routes ----------
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-@socketio.on("start_scraping")
-def handle_start_scraping():
-    socketio.emit("log", {"message": "Avvio scraping..."})
-    scrape_events_playwright()
-    save_csv()
-    socketio.emit("scraping_done", {"count": len(scraped_data)})
-
-@app.route("/download_csv")
-def download_csv():
-    if not scraped_data:
-        return "Nessun dato disponibile", 400
-    from io import StringIO, BytesIO
-    text_buffer = StringIO()
-    fieldnames = [
-        "title","type","dates","location","application_deadline",
-        "participants_no","participants_from","recommended_for",
-        "accessibility","working_language","organiser",
-        "participation_fee","accommodation_food","travel_reimbursement",
-        "infopack_downloads","application_procedure_url","application_form_link",
-        "training_description","detail_url"
-    ]
-    writer = csv.DictWriter(text_buffer, fieldnames=fieldnames)
-    writer.writeheader()
-    writer.writerows(scraped_data)
-    bytes_buffer = BytesIO(text_buffer.getvalue().encode("utf-8"))
-    bytes_buffer.seek(0)
-    return send_file(bytes_buffer, mimetype="text/csv", as_attachment=True, download_name="salto_events_complete.csv")
-
-if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    # Se vuoi, qui puoi ciclare ogni detail_url per estrarre description ecc.
