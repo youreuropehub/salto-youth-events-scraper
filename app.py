@@ -25,12 +25,18 @@ scraped_data = []
 def build_search_url(offset: int) -> str:
     today = date.today()
     day, month, year = today.day, today.month, today.year
+    # URL completo come nella versione funzionante precedente
     return (
         f"{BASE_URL}/tools/european-training-calendar/browse/"
         f"?b_offset={offset}&b_limit=10&b_order=applicationDeadline"
         f"&b_keyword="
         f"&b_begin_date_after_day={day}&b_begin_date_after_month={month}&b_begin_date_after_year={year}"
+        f"&b_begin_date_before_day=&b_begin_date_before_month=&b_begin_date_before_year="
+        f"&b_end_date_after_day=&b_end_date_after_month=&b_end_date_after_year="
+        f"&b_end_date_before_day=&b_end_date_before_month=&b_end_date_before_year="
+        f"&b_activity_type=&b_country=&b_participating_countries="
         f"&b_application_deadline_after_day={day}&b_application_deadline_after_month={month}&b_application_deadline_after_year={year}"
+        f"&b_application_deadline_before_day=&b_application_deadline_before_month=&b_application_deadline_before_year="
     )
 
 def parse_list_page(html):
@@ -98,6 +104,9 @@ def save_csv_to_file():
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(scraped_data)
+    socketio.emit("log", {"message": f"CSV salvato in {csv_path}"})
+
+# ---------- Main scraping function with logs ----------
 
 def scrape_events(max_pages:int):
     global scraped_data
@@ -108,34 +117,48 @@ def scrape_events(max_pages:int):
     page=0
     page_size=10
 
+    socketio.emit("log", {"message": f"[INFO] Avvio scraping su {max_pages} pagine..."})
+
     while page<max_pages:
         offset=page*page_size
+        socketio.emit("log", {"message": f"[INFO] Caricamento pagina {page+1} (offset={offset})..."})
         try:
             resp = session.get(build_search_url(offset),timeout=15)
             resp.raise_for_status()
-        except Exception:
+            socketio.emit("log", {"message": f"[INFO] Pagina {page+1} caricata, URL: {resp.url}"})
+        except Exception as e:
+            socketio.emit("log", {"message": f"[ERROR] Errore caricamento pagina {page+1}: {e}"})
             break
 
         events=parse_list_page(resp.text)
-        if not events: break
+        socketio.emit("log", {"message": f"[INFO] Eventi trovati in lista pagina {page+1}: {len(events)}"})
+        if not events: 
+            socketio.emit("log", {"message": "[INFO] Nessun evento trovato, fine paginazione"})
+            break
+
         for e in events:
             detail_url=e["detail_url"]
             if detail_url not in events_dict:
                 events_dict[detail_url]=e
+
+        socketio.emit("log", {"message": f"[INFO] Totale eventi unici finora: {len(events_dict)}"})
         page+=1
         time.sleep(1)
 
     scraped_data=list(events_dict.values())
+    socketio.emit("log", {"message": f"[INFO] Totale eventi raccolti dalla lista: {len(scraped_data)}"})
 
     # Recupero training_description da dettaglio
-    for e in scraped_data:
+    for i, e in enumerate(scraped_data, start=1):
         url=e["detail_url"]
+        socketio.emit("log", {"message": f"[INFO] [{i}/{len(scraped_data)}] Recupero dettaglio: {url}"})
         try:
             resp=session.get(url,timeout=15)
             resp.raise_for_status()
             detail=parse_detail_page(resp.text)
             e.update(detail)
-        except:
+        except Exception as ex:
+            socketio.emit("log", {"message": f"[ERROR] Errore recupero dettaglio: {ex}"})
             e.update({"training_description":""})
         time.sleep(1)
 
