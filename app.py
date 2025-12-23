@@ -8,7 +8,7 @@ import csv
 import re
 from io import StringIO, BytesIO
 from datetime import date
-from flask import Flask, render_template, jsonify, send_file
+from flask import Flask, render_template, jsonify, send_file, request
 from flask_socketio import SocketIO, emit
 from bs4 import BeautifulSoup
 import requests
@@ -26,7 +26,6 @@ scraped_data = []
 def build_search_url(offset: int) -> str:
     today = date.today()
     day, month, year = today.day, today.month, today.year
-
     base = (
         "https://www.salto-youth.net/tools/european-training-calendar/browse/"
         "?b_offset={offset}&b_limit=10"
@@ -43,24 +42,19 @@ def build_search_url(offset: int) -> str:
 
 
 def parse_list_page(html):
-    """
-    Estrae gli eventi dalla pagina di lista SALTO
-    """
     soup = BeautifulSoup(html, "html.parser")
     seen_urls = set()
     events = []
 
-    # Metodo 1: h3 + link
+    socketio.emit("log", {"message": f"[DEBUG] Parsing lista eventi..."})
+
     for h3 in soup.find_all("h3"):
         a = h3.find("a")
-        if not a:
-            continue
+        if not a: continue
         title = a.get_text(strip=True)
         url = a.get("href", "").strip()
-        if url and not url.startswith("http"):
-            url = BASE_URL + url
-        if url in seen_urls:
-            continue
+        if url and not url.startswith("http"): url = BASE_URL + url
+        if url in seen_urls: continue
         seen_urls.add(url)
 
         block = h3.parent
@@ -75,16 +69,19 @@ def parse_list_page(html):
         location = lines[idx+2] if idx+2<len(lines) else ""
         application_deadline = ""
 
-        # --- Nuovo: cerca callout-module per Application deadline ---
+        # --- DEBUG: blocchi callout-module ---
         for callout in block.find_all("div", class_="callout-module"):
+            socketio.emit("log", {"message": f"[DEBUG] trovato callout-module per evento '{title}'"})
             p_tags = callout.find_all("p")
             for i, p in enumerate(p_tags):
-                if "Application deadline" in p.get_text():
+                p_text = p.get_text(strip=True)
+                socketio.emit("log", {"message": f"[DEBUG] p_tag: '{p_text}'"})
+                if "Application deadline" in p_text:
                     if i+1 < len(p_tags):
                         application_deadline = p_tags[i+1].get_text(strip=True)
+                        socketio.emit("log", {"message": f"[DEBUG] Application deadline trovato: {application_deadline}"})
                         break
-            if application_deadline:
-                break
+            if application_deadline: break
 
         events.append({
             "title": title,
@@ -94,64 +91,23 @@ def parse_list_page(html):
             "application_deadline": application_deadline,
             "detail_url": url,
         })
-
-    # Metodo 2: link diretti
-    for link in soup.select("a[href*='/tools/european-training-calendar/training/']"):
-        title = link.get_text(strip=True)
-        if not title:
-            continue
-        detail_url = link.get("href", "").strip()
-        if detail_url and not detail_url.startswith("http"):
-            detail_url = BASE_URL + detail_url
-        if detail_url in seen_urls:
-            continue
-        seen_urls.add(detail_url)
-
-        container = link.find_parent()
-        for _ in range(4):
-            if container and container.name not in ["body", "html"]:
-                container = container.parent
-
-        text_block = container.get_text("\n", strip=True) if container else ""
-        lines = [l.strip() for l in text_block.split("\n") if l.strip()]
-
-        try: idx = lines.index(title)
-        except ValueError: idx = 0
-
-        type_ = lines[idx-1] if idx-1>=0 else ""
-        dates = lines[idx+1] if idx+1<len(lines) else ""
-        location = lines[idx+2] if idx+2<len(lines) else ""
-        application_deadline = ""
-
-        for i, line in enumerate(lines):
-            if "Application deadline" in line:
-                if i+1 < len(lines):
-                    application_deadline = lines[i+1].strip()
-                break
-
-        events.append({
-            "title": title,
-            "type": type_,
-            "dates": dates,
-            "location": location,
-            "application_deadline": application_deadline,
-            "detail_url": detail_url,
-        })
+        socketio.emit("log", {"message": f"[DEBUG] Evento lista aggiunto: {title}, deadline: {application_deadline}, url: {url}"})
 
     return events
 
 
 def parse_detail_page(html, detail_url):
-    """
-    Estrae info aggiuntive dalla pagina di dettaglio
-    """
     soup = BeautifulSoup(html, "html.parser")
+    socketio.emit("log", {"message": f"[DEBUG] Parsing dettaglio evento: {detail_url}"})
 
     # ---------- Training description ----------
     training_description = ""
     desc_div = soup.find("div", class_="training-description")
     if desc_div:
         training_description = desc_div.get_text("\n", strip=True)
+        socketio.emit("log", {"message": f"[DEBUG] Training description trovata, lunghezza: {len(training_description)}"})
+    else:
+        socketio.emit("log", {"message": f"[DEBUG] Training description NON trovata"})
 
     # ---------- Training overview ----------
     training_overview = ""
@@ -239,6 +195,7 @@ def parse_detail_page(html, detail_url):
         "training_description": training_description,
     }
 
+
 def get_external_application_link(application_procedure_url):
     if not application_procedure_url: return ""
     try:
@@ -273,7 +230,7 @@ def save_csv_to_file():
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(scraped_data)
-    socketio.emit("log", {"message": f"CSV salvato in {csv_path}"})
+    socketio.emit("log", {"message": f"[DEBUG] CSV salvato in {csv_path}"})
 
 
 def scrape_events(max_pages:int):
@@ -287,13 +244,13 @@ def scrape_events(max_pages:int):
 
     while page < max_pages:
         offset = page*page_size
-        socketio.emit("log", {"message": f"Caricamento pagina {page+1} (offset={offset})..."})
+        socketio.emit("log", {"message": f"[DEBUG] Caricamento pagina {page+1} (offset={offset})..."})
         try:
             url = build_search_url(offset)
             resp = session.get(url, timeout=15)
             resp.raise_for_status()
         except Exception as e:
-            socketio.emit("log", {"message": f"Errore pagina {page+1}: {e}"})
+            socketio.emit("log", {"message": f"[ERROR] Pagina {page+1}: {e}"})
             break
 
         events = parse_list_page(resp.text)
@@ -307,20 +264,22 @@ def scrape_events(max_pages:int):
         time.sleep(1)
 
     scraped_data = list(events_dict.values())
-    socketio.emit("log", {"message": f"Totale eventi trovati: {len(scraped_data)}"})
+    socketio.emit("log", {"message": f"[DEBUG] Totale eventi trovati in lista: {len(scraped_data)}"})
 
     # Dettagli
     for i, event in enumerate(scraped_data,start=1):
         detail_url = event.get("detail_url","")
         if not detail_url: continue
-        socketio.emit("log", {"message": f"[{i}/{len(scraped_data)}] {event['title']}"})
+        socketio.emit("log", {"message": f"[DEBUG] [{i}/{len(scraped_data)}] Visita dettaglio: {detail_url}"})
         try:
             resp = session.get(detail_url, timeout=15)
             resp.raise_for_status()
             detail = parse_detail_page(resp.text, detail_url)
             detail["application_form_link"] = get_external_application_link(detail["application_procedure_url"]) if detail["application_procedure_url"] else ""
             event.update(detail)
-        except:
+            socketio.emit("log", {"message": f"[DEBUG] Dati dettaglio aggiornati per '{event['title']}'"})
+        except Exception as e:
+            socketio.emit("log", {"message": f"[ERROR] Errore dettaglio {detail_url}: {e}"})
             event.update({k:"" for k in ["participants_no","participants_from","recommended_for","accessibility","working_language","organiser","participation_fee","accommodation_food","travel_reimbursement","infopack_downloads","application_procedure_url","application_form_link","training_description"]})
         time.sleep(1)
 
@@ -341,7 +300,7 @@ def handle_start_scraping(data):
         if max_pages<1: max_pages=1
     except:
         max_pages=1
-    socketio.emit("log", {"message": f"Avvio scraping ({max_pages} pagine)..."})
+    socketio.emit("log", {"message": f"[DEBUG] Avvio scraping ({max_pages} pagine)..."})
     scrape_events(max_pages)
 
 @app.route("/download_csv")
