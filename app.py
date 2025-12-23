@@ -1,167 +1,262 @@
-def scrape_events():
-    """Scraping ciclando tutte le pagine della lista eventi SALTO e visitando ogni dettaglio"""
-    global scraped_data
-    scraped_data = []
+# IMPORTANTE: monkey patching di gevent PRIMA di qualsiasi altro import
+from gevent import monkey
+monkey.patch_all()
 
-    session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0"})
+import os
+import time
+import csv
+from io import StringIO, BytesIO
+from datetime import date
+from flask import Flask, render_template, jsonify, send_file
+from flask_socketio import SocketIO, emit
+from bs4 import BeautifulSoup
+import requests
 
-    url = "https://www.salto-youth.net/tools/european-training-calendar/browse/"
-    events_dict = {}
-    page_num = 1
+app = Flask(__name__)
+app.config["SECRET_KEY"] = "secret!"
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-    while url:
-        socketio.emit("log", {"message": f"[DEBUG] Caricamento pagina {page_num}: {url}"})
-        try:
-            resp = session.get(url, timeout=15)
-            resp.raise_for_status()
-        except Exception as e:
-            socketio.emit("log", {"message": f"[ERROR] Pagina {page_num}: {e}"})
-            break
+BASE_URL = "https://www.salto-youth.net"
+OUTPUT_DIR = "output"
+scraped_data = []
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-        rows = soup.select(".search-results-list .tool-item")
+# ---------- Helper functions ----------
 
-        if not rows:
-            socketio.emit("log", {"message": f"[DEBUG] Nessun evento trovato a pagina {page_num}"})
-            break
+def build_search_url(offset: int) -> str:
+    today = date.today()
+    day, month, year = today.day, today.month, today.year
+    return (
+        f"{BASE_URL}/tools/european-training-calendar/browse/?b_offset={offset}&b_limit=10"
+        f"&b_order=applicationDeadline"
+        f"&b_begin_date_after_day={day}&b_begin_date_after_month={month}&b_begin_date_after_year={year}"
+        f"&b_application_deadline_after_day={day}&b_application_deadline_after_month={month}&b_application_deadline_after_year={year}"
+    )
 
-        for row in rows:
-            title_tag = row.select_one("h2 a")
-            title = title_tag.get_text(strip=True) if title_tag else ""
-            detail_url = title_tag.get("href") if title_tag else ""
-            if detail_url and not detail_url.startswith("http"):
-                detail_url = BASE_URL + detail_url
+def parse_list_page(html):
+    soup = BeautifulSoup(html, "html.parser")
+    seen_urls = set()
+    events = []
 
-            if detail_url in events_dict:
-                continue
+    for h3 in soup.find_all("h3"):
+        a = h3.find("a")
+        if not a: continue
+        title = a.get_text(strip=True)
+        url = a.get("href","").strip()
+        if url and not url.startswith("http"): url = BASE_URL + url
+        if url in seen_urls: continue
+        seen_urls.add(url)
 
-            type_ = row.select_one("span.h3.tool-item-category")
-            type_ = type_.get_text(strip=True) if type_ else ""
+        block = h3.parent
+        text = block.get_text("\n", strip=True)
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-            dates = row.select_one("p.h5")
-            dates = dates.get_text(strip=True) if dates else ""
+        try: idx = lines.index(title)
+        except ValueError: idx = 0
 
-            location = row.select_one(".microcopy.mrgn-btm-17")
-            location = location.get_text(strip=True) if location else ""
+        type_ = lines[idx-1] if idx>0 else ""
+        dates = lines[idx+1] if idx+1<len(lines) else ""
+        location = lines[idx+2] if idx+2<len(lines) else ""
+        application_deadline = ""
+        for l in lines:
+            if "Application deadline" in l:
+                application_deadline = l.split(":",1)[-1].strip()
+                break
 
-            # Application deadline
-            app_deadline = ""
-            callout = row.select_one("div.callout-module")
-            if callout:
-                p_tags = callout.find_all("p")
-                for i, p in enumerate(p_tags):
-                    if "Application deadline" in p.get_text(strip=True):
-                        if i + 1 < len(p_tags):
-                            app_deadline = p_tags[i + 1].get_text(strip=True)
-                        break
+        events.append({
+            "title": title,
+            "type": type_,
+            "dates": dates,
+            "location": location,
+            "application_deadline": application_deadline,
+            "detail_url": url
+        })
 
-            # Inizializza evento con dati dalla lista
-            event_data = {
-                "title": title,
-                "type": type_,
-                "dates": dates,
-                "location": location,
-                "application_deadline": app_deadline,
-                "detail_url": detail_url,
-                # campi extra da dettaglio
-                "participants_no": "",
-                "participants_from": "",
-                "recommended_for": "",
-                "accessibility": "",
-                "working_language": "",
-                "organiser": "",
-                "participation_fee": "",
-                "accommodation_food": "",
-                "travel_reimbursement": "",
-                "infopack_downloads": "",
-                "application_procedure_url": "",
-                "application_form_link": "",
-                "training_description": "",
-            }
+    return events
 
-            # Visita pagina dettaglio
-            try:
-                detail_resp = session.get(detail_url, timeout=15)
-                detail_resp.raise_for_status()
-                detail_soup = BeautifulSoup(detail_resp.text, "html.parser")
+def parse_detail_page(html, detail_url):
+    soup = BeautifulSoup(html,"html.parser")
+    # Training description
+    training_description = ""
+    desc_div = soup.find("div", class_="training-description")
+    if desc_div:
+        training_description = desc_div.get_text("\n",strip=True)
 
-                # ---------- Training description ----------
-                desc_div = detail_soup.find("div", class_="training-description")
-                if desc_div:
-                    event_data["training_description"] = desc_div.get_text("\n", strip=True)
+    # Overview fields
+    training_overview=""
+    h3_overview = soup.find(lambda tag: tag.name in ["h3","h4"] and "Training overview" in tag.get_text())
+    if h3_overview:
+        parts=[]
+        for sib in h3_overview.find_next_siblings():
+            if sib.name and sib.name.startswith("h"): break
+            parts.append(sib.get_text("\n",strip=True))
+        training_overview="\n".join(parts).strip()
 
-                # ---------- Training overview ----------
-                h3_overview = detail_soup.find(lambda tag: tag.name in ["h3","h4"] and "Training overview" in tag.get_text())
-                if h3_overview:
-                    lines = [l.strip() for l in h3_overview.find_next_siblings(text=True)]
-                    for i, line in enumerate(lines):
-                        line_low = line.lower()
-                        if line_low == "for" and i+1 < len(lines) and "participants" in lines[i+1].lower():
-                            event_data["participants_no"] = lines[i+1].replace("participants","").strip()
-                            # countries
-                            countries = []
-                            j = i + 2
-                            while j < len(lines) and not lines[j].lower().startswith("and recommended"):
-                                countries.append(lines[j])
-                                j += 1
-                            event_data["participants_from"] = " ".join(countries).strip()
-                        if "and recommended for" in line_low and i+1 < len(lines):
-                            event_data["recommended_for"] = lines[i+1].strip()
-                        if "working language(s):" in line_low:
-                            after = line.split("Working language(s):",1)[-1].strip()
-                            event_data["working_language"] = after if after else lines[i+1].strip() if i+1 < len(lines) else ""
-                        if line_low.startswith("organiser"):
-                            after = line.split("Organiser",1)[-1].replace(":","").strip()
-                            event_data["organiser"] = after if after else lines[i+1].strip() if i+1 < len(lines) else ""
+    participants_no = participants_from = recommended_for = working_lang = organiser = ""
+    lines = [l.strip() for l in training_overview.splitlines() if l.strip()]
+    i=0
+    while i<len(lines):
+        line = lines[i].lower()
+        if line=="for" and i+1<len(lines) and "participants" in lines[i+1].lower():
+            participants_no = lines[i+1].replace("participants","").strip()
+            j=i+2
+            countries=[]
+            while j<len(lines):
+                if lines[j].lower()=="from": j+=1; continue
+                if lines[j].lower().startswith("and recommended"): break
+                countries.append(lines[j]); j+=1
+            participants_from=" ".join(countries).strip()
+            i=j; continue
+        if "and recommended for" in line and i+1<len(lines):
+            recommended_for = lines[i+1].strip()
+        if "working language(s):" in line:
+            after = lines[i].split("Working language(s):",1)[-1].strip()
+            working_lang = after if after else lines[i+1].strip() if i+1<len(lines) else ""
+        if line.startswith("organiser"):
+            after = lines[i].split("Organiser",1)[-1].replace(":","").strip()
+            organiser = after if after else lines[i+1].strip() if i+1<len(lines) else ""
+        i+=1
 
-                # ---------- Other sections ----------
-                def section_after_heading(text):
-                    h = detail_soup.find(lambda tag: tag.name in ["h3","h4"] and text in tag.get_text())
-                    if not h: return ""
-                    parts=[]
-                    for sib in h.find_next_siblings():
-                        if sib.name and sib.name.startswith("h"): break
-                        parts.append(sib.get_text(" ",strip=True))
-                    return " ".join(parts).strip()
+    # Sections
+    def section_after_heading(text):
+        h = soup.find(lambda tag: tag.name in ["h3","h4"] and text in tag.get_text())
+        if not h: return ""
+        parts=[]
+        for sib in h.find_next_siblings():
+            if sib.name and sib.name.startswith("h"): break
+            parts.append(sib.get_text(" ",strip=True))
+        return " ".join(parts).strip()
 
-                event_data["accessibility"] = section_after_heading("Accessibility info")
-                event_data["participation_fee"] = section_after_heading("Participation fee")
-                event_data["accommodation_food"] = section_after_heading("Accommodation and food")
-                event_data["travel_reimbursement"] = section_after_heading("Travel reimbursement")
+    accessibility = section_after_heading("Accessibility info")
+    participation_fee = section_after_heading("Participation fee")
+    accommodation_food = section_after_heading("Accommodation and food")
+    travel_reimbursement = section_after_heading("Travel reimbursement")
 
-                # Available downloads
-                event_data["infopack_downloads"] = ""
-                downloads_heading = detail_soup.find(lambda tag: tag.name in ['h3','h4','h5','strong','b','p'] and "Available downloads" in tag.get_text())
-                if downloads_heading:
-                    for sib in downloads_heading.find_next_siblings():
-                        if sib.name and sib.name.startswith("h"): break
-                        link = sib.find("a", href=True)
-                        if link:
-                            event_data["infopack_downloads"] = BASE_URL + link["href"] if not link["href"].startswith("http") else link["href"]
-                            break
-
-                # Application procedure
-                app_proc_link = detail_soup.find("a", href=lambda h: h and "/application-procedure/" in h)
-                if app_proc_link:
-                    href = app_proc_link["href"]
+    # Infopack downloads
+    infopack_downloads=""
+    for tag in soup.find_all(['h3','h4','h5','strong','b','p']):
+        if "Available downloads:" in tag.get_text():
+            for sib in tag.find_next_siblings():
+                if sib.name and sib.name.startswith("h"): break
+                first_link = sib.find("a", href=True)
+                if first_link:
+                    href = first_link["href"]
                     if not href.startswith("http"): href = BASE_URL + href
-                    event_data["application_procedure_url"] = href
-                    event_data["application_form_link"] = get_external_application_link(href)
+                    infopack_downloads = href
+                    break
+            if infopack_downloads: break
 
-            except Exception as e:
-                socketio.emit("log", {"message": f"[ERROR] Dettaglio evento {title}: {e}"})
+    # Application procedure
+    application_procedure_url=""
+    for link in soup.find_all("a", href=True):
+        if "/application-procedure/" in link["href"]:
+            href = link["href"]
+            if not href.startswith("http"): href = BASE_URL + href
+            application_procedure_url = href
+            break
 
-            events_dict[detail_url] = event_data
-            socketio.emit("log", {"message": f"[DEBUG] Evento dettagliato aggiunto: {title}"})
+    return {
+        "participants_no": participants_no,
+        "participants_from": participants_from,
+        "recommended_for": recommended_for,
+        "accessibility": accessibility,
+        "working_language": working_lang,
+        "organiser": organiser,
+        "participation_fee": participation_fee,
+        "accommodation_food": accommodation_food,
+        "travel_reimbursement": travel_reimbursement,
+        "infopack_downloads": infopack_downloads,
+        "application_procedure_url": application_procedure_url,
+        "training_description": training_description,
+    }
 
-        # Pagina successiva
-        next_page = soup.select_one(".search-result-list-navigation a.next-page")
-        url = BASE_URL + next_page.get("href") if next_page else None
-        page_num += 1
+def get_external_application_link(application_procedure_url):
+    if not application_procedure_url: return ""
+    try:
+        resp = requests.get(application_procedure_url, timeout=10)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text,"html.parser")
+        ext_link = soup.find("a", string=re.compile(r"Proceed to the external", re.IGNORECASE))
+        if ext_link and ext_link.get("href"): return ext_link["href"]
+        return ""
+    except:
+        return ""
+
+def save_csv_to_file():
+    if not scraped_data: return
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    csv_path = os.path.join(OUTPUT_DIR, "salto_events_complete.csv")
+    fieldnames = [
+        "title","type","dates","location","application_deadline",
+        "participants_no","participants_from","recommended_for","accessibility","working_language","organiser",
+        "participation_fee","accommodation_food","travel_reimbursement","infopack_downloads",
+        "application_procedure_url","application_form_link","training_description","detail_url"
+    ]
+    with open(csv_path,"w",newline="",encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(scraped_data)
+    socketio.emit("log", {"message": f"CSV salvato in {csv_path}"})
+
+def scrape_events():
+    global scraped_data
+    scraped_data=[]
+    session = requests.Session()
+    session.headers.update({"User-Agent":"Mozilla/5.0"})
+    events_dict={}
+    page=0
+    page_size=10
+    while True:
+        offset = page*page_size
+        url = build_search_url(offset)
+        resp = session.get(url, timeout=15)
+        resp.raise_for_status()
+        events = parse_list_page(resp.text)
+        if not events: break
+        for e in events:
+            if e["detail_url"] not in events_dict:
+                events_dict[e["detail_url"]] = e
+        page+=1
         time.sleep(1)
-
     scraped_data = list(events_dict.values())
-    socketio.emit("log", {"message": f"[DEBUG] Totale eventi raccolti: {len(scraped_data)}"})
+    # Dettaglio
+    for i,e in enumerate(scraped_data,1):
+        d_url = e.get("detail_url")
+        if not d_url: continue
+        resp = session.get(d_url, timeout=15)
+        resp.raise_for_status()
+        detail = parse_detail_page(resp.text, d_url)
+        detail["application_form_link"] = get_external_application_link(detail["application_procedure_url"]) if detail["application_procedure_url"] else ""
+        e.update(detail)
+        time.sleep(1)
     save_csv_to_file()
     socketio.emit("scraping_done", {"count": len(scraped_data)})
+
+# ---------- Routes ----------
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+@socketio.on("start_scraping")
+def handle_start_scraping(data=None):
+    socketio.emit("log", {"message":"Avvio scraping..."})
+    scrape_events()
+
+@app.route("/download_csv")
+def download_csv():
+    if not scraped_data: return "Nessun dato disponibile",400
+    text_buffer = StringIO()
+    fieldnames = [
+        "title","type","dates","location","application_deadline",
+        "participants_no","participants_from","recommended_for","accessibility","working_language","organiser",
+        "participation_fee","accommodation_food","travel_reimbursement",
+        "infopack_downloads","application_procedure_url","application_form_link","training_description","detail_url"
+    ]
+    writer = csv.DictWriter(text_buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(scraped_data)
+    bytes_buffer = BytesIO(text_buffer.getvalue().encode("utf-8"))
+    bytes_buffer.seek(0)
+    return send_file(bytes_buffer,mimetype="text/csv",as_attachment=True,download_name="salto_events_complete.csv")
+
+if __name__ == "__main__":
+    socketio.run(app, debug=True, host="0.0.0.0", port=5000)
