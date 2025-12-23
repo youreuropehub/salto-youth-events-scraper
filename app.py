@@ -68,31 +68,17 @@ def parse_list_page(html):
         type_ = lines[idx-1] if idx>0 else ""
         dates = lines[idx+1] if idx+1<len(lines) else ""
         location = lines[idx+2] if idx+2<len(lines) else ""
-        application_deadline = ""
-
-        # Cerca callout-module con Application deadline (lista eventi)
-        callouts = block.find_all("div", class_="callout-module")
-        for callout in callouts:
-            p_tags = callout.find_all("p")
-            for i,p in enumerate(p_tags):
-                if "Application deadline" in p.get_text(strip=True):
-                    if i+1<len(p_tags):
-                        application_deadline = p_tags[i+1].get_text(strip=True)
-                        socketio.emit("log", {"message": f"[DEBUG] Application deadline trovato: {application_deadline}"})
-                        break
-            if application_deadline: break
 
         events.append({
             "title": title,
             "type": type_,
             "dates": dates,
             "location": location,
-            "application_deadline": application_deadline,
             "detail_url": url
         })
-        socketio.emit("log", {"message": f"[DEBUG] Evento lista aggiunto: {title}, deadline: {application_deadline}"})
+        socketio.emit("log", {"message": f"[DEBUG] Evento lista aggiunto: {title}"})
 
-    # METODO 2: cerca tutti i link diretti se non trovati
+    # METODO 2: tutti i link diretti
     for link in soup.select("a[href*='/tools/european-training-calendar/training/']"):
         title = link.get_text(strip=True)
         if not title: continue
@@ -113,29 +99,15 @@ def parse_list_page(html):
         type_ = lines[idx-1] if idx>0 else ""
         dates = lines[idx+1] if idx+1<len(lines) else ""
         location = lines[idx+2] if idx+2<len(lines) else ""
-        application_deadline = ""
-
-        # Cerca callout-module
-        callouts = container.find_all("div", class_="callout-module") if container else []
-        for callout in callouts:
-            p_tags = callout.find_all("p")
-            for i,p in enumerate(p_tags):
-                if "Application deadline" in p.get_text(strip=True):
-                    if i+1<len(p_tags):
-                        application_deadline = p_tags[i+1].get_text(strip=True)
-                        socketio.emit("log", {"message": f"[DEBUG] Application deadline trovato: {application_deadline}"})
-                        break
-            if application_deadline: break
 
         events.append({
             "title": title,
             "type": type_,
             "dates": dates,
             "location": location,
-            "application_deadline": application_deadline,
             "detail_url": detail_url
         })
-        socketio.emit("log", {"message": f"[DEBUG] Evento lista aggiunto: {title}, deadline: {application_deadline}"})
+        socketio.emit("log", {"message": f"[DEBUG] Evento lista aggiunto: {title}"})
 
     return events
 
@@ -143,6 +115,18 @@ def parse_list_page(html):
 def parse_detail_page(html, detail_url):
     soup = BeautifulSoup(html,"html.parser")
     socketio.emit("log", {"message": f"[DEBUG] Parsing dettaglio: {detail_url}"})
+
+    # ---------- Application deadline ----------
+    application_deadline = ""
+    for callout in soup.find_all("div", class_="callout-module"):
+        p_tags = callout.find_all("p")
+        for i, p in enumerate(p_tags):
+            if "Application deadline" in p.get_text(strip=True):
+                if i+1 < len(p_tags):
+                    application_deadline = p_tags[i+1].get_text(strip=True)
+                    socketio.emit("log", {"message": f"[DEBUG] Application deadline trovato: {application_deadline}"})
+                    break
+        if application_deadline: break
 
     # ---------- Training description ----------
     training_description = ""
@@ -225,6 +209,7 @@ def parse_detail_page(html, detail_url):
             break
 
     return {
+        "application_deadline": application_deadline,
         "participants_no": participants_no,
         "participants_from": participants_from,
         "recommended_for": recommended_for,
@@ -250,7 +235,7 @@ def get_external_application_link(application_procedure_url):
         if ext_link and ext_link.get("href"): return ext_link["href"]
         for a in soup.find_all("a", href=True):
             href = a["href"]
-            if any(domain in href for domain in ["forms.gle","google.com/forms","typeform.com","typeform.com","surveymonkey.com","jotform.com"]):
+            if any(domain in href for domain in ["forms.gle","google.com/forms","typeform.com","surveymonkey.com","jotform.com"]):
                 return href
         return ""
     except Exception as e:
@@ -264,11 +249,10 @@ def save_csv_to_file():
     csv_path = os.path.join(OUTPUT_DIR, "salto_events_complete.csv")
     fieldnames = [
         "title","type","dates","location","application_deadline",
-        "participants_no","participants_from","recommended_for",
-        "accessibility","working_language","organiser",
-        "participation_fee","accommodation_food","travel_reimbursement",
-        "infopack_downloads","application_procedure_url","application_form_link",
-        "training_description","detail_url"
+        "participants_no","participants_from","recommended_for","accessibility",
+        "working_language","organiser","participation_fee","accommodation_food",
+        "travel_reimbursement","infopack_downloads","application_procedure_url",
+        "application_form_link","training_description","detail_url"
     ]
     with open(csv_path,"w",newline="",encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -324,7 +308,7 @@ def scrape_events(max_pages:int):
             socketio.emit("log", {"message": f"[DEBUG] Dati dettaglio aggiornati per '{event['title']}'"})
         except Exception as e:
             socketio.emit("log", {"message": f"[ERROR] Errore dettaglio {detail_url}: {e}"})
-            event.update({k:"" for k in ["participants_no","participants_from","recommended_for","accessibility","working_language","organiser","participation_fee","accommodation_food","travel_reimbursement","infopack_downloads","application_procedure_url","application_form_link","training_description"]})
+            event.update({k:"" for k in ["application_deadline","participants_no","participants_from","recommended_for","accessibility","working_language","organiser","participation_fee","accommodation_food","travel_reimbursement","infopack_downloads","application_procedure_url","application_form_link","training_description"]})
         time.sleep(1)
 
     save_csv_to_file()
@@ -353,11 +337,10 @@ def download_csv():
     text_buffer = StringIO()
     fieldnames = [
         "title","type","dates","location","application_deadline",
-        "participants_no","participants_from","recommended_for",
-        "accessibility","working_language","organiser",
-        "participation_fee","accommodation_food","travel_reimbursement",
-        "infopack_downloads","application_procedure_url","application_form_link",
-        "training_description","detail_url"
+        "participants_no","participants_from","recommended_for","accessibility",
+        "working_language","organiser","participation_fee","accommodation_food",
+        "travel_reimbursement","infopack_downloads","application_procedure_url",
+        "application_form_link","training_description","detail_url"
     ]
     writer = csv.DictWriter(text_buffer, fieldnames=fieldnames)
     writer.writeheader()
