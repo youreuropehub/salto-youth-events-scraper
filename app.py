@@ -7,7 +7,7 @@ import time
 import csv
 from io import StringIO, BytesIO
 from datetime import date
-from flask import Flask, render_template, jsonify, send_file, request
+from flask import Flask, render_template, send_file
 from flask_socketio import SocketIO, emit
 from bs4 import BeautifulSoup
 import requests
@@ -30,6 +30,7 @@ def build_search_url(offset: int) -> str:
         f"?b_offset={offset}&b_limit=10&b_order=applicationDeadline"
         f"&b_keyword="
         f"&b_begin_date_after_day={day}&b_begin_date_after_month={month}&b_begin_date_after_year={year}"
+        f"&b_application_deadline_after_day={day}&b_application_deadline_after_month={month}&b_application_deadline_after_year={year}"
     )
 
 def parse_list_page(html):
@@ -55,7 +56,7 @@ def parse_list_page(html):
         dates = lines[idx+1] if idx+1<len(lines) else ""
         location = lines[idx+2] if idx+2<len(lines) else ""
 
-        # ---------- Nuovo: application_deadline dalla lista eventi ----------
+        # Application deadline dalla lista eventi
         application_deadline=""
         callout = block.find("div", class_="callout-module")
         if callout:
@@ -85,20 +86,6 @@ def parse_detail_page(html):
         training_description = desc_div.get_text("\n",strip=True)
     return {"training_description": training_description}
 
-def get_external_application_link(url):
-    if not url: return ""
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text,"html.parser")
-        link = soup.find("a", string=lambda t: t and "Proceed to the external" in t)
-        if link and link.get("href"): return link["href"]
-        for a in soup.find_all("a", href=True):
-            if any(d in a["href"] for d in ["forms.gle","typeform.com","jotform.com","surveymonkey.com"]):
-                return a["href"]
-    except: return ""
-    return ""
-
 def save_csv_to_file():
     if not scraped_data: return
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -126,7 +113,7 @@ def scrape_events(max_pages:int):
         try:
             resp = session.get(build_search_url(offset),timeout=15)
             resp.raise_for_status()
-        except Exception as e:
+        except Exception:
             break
 
         events=parse_list_page(resp.text)
