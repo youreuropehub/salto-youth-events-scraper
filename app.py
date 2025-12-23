@@ -5,13 +5,13 @@ monkey.patch_all()
 import os
 import time
 import csv
-import re
 from io import StringIO, BytesIO
 from datetime import date
 from flask import Flask, render_template, jsonify, send_file, request
 from flask_socketio import SocketIO, emit
 from bs4 import BeautifulSoup
 import requests
+import re
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
@@ -46,13 +46,14 @@ def parse_list_page(html):
     seen_urls = set()
     events = []
 
-    socketio.emit("log", {"message": f"[DEBUG] Parsing lista eventi..."})
+    socketio.emit("log", {"message": "[DEBUG] Parsing lista eventi..."})
 
+    # METODO 1: cerca <h3> con link
     for h3 in soup.find_all("h3"):
         a = h3.find("a")
         if not a: continue
         title = a.get_text(strip=True)
-        url = a.get("href", "").strip()
+        url = a.get("href","").strip()
         if url and not url.startswith("http"): url = BASE_URL + url
         if url in seen_urls: continue
         seen_urls.add(url)
@@ -69,15 +70,13 @@ def parse_list_page(html):
         location = lines[idx+2] if idx+2<len(lines) else ""
         application_deadline = ""
 
-        # --- DEBUG: blocchi callout-module ---
-        for callout in block.find_all("div", class_="callout-module"):
-            socketio.emit("log", {"message": f"[DEBUG] trovato callout-module per evento '{title}'"})
+        # Cerca callout-module con Application deadline (lista eventi)
+        callouts = block.find_all("div", class_="callout-module")
+        for callout in callouts:
             p_tags = callout.find_all("p")
-            for i, p in enumerate(p_tags):
-                p_text = p.get_text(strip=True)
-                socketio.emit("log", {"message": f"[DEBUG] p_tag: '{p_text}'"})
-                if "Application deadline" in p_text:
-                    if i+1 < len(p_tags):
+            for i,p in enumerate(p_tags):
+                if "Application deadline" in p.get_text(strip=True):
+                    if i+1<len(p_tags):
                         application_deadline = p_tags[i+1].get_text(strip=True)
                         socketio.emit("log", {"message": f"[DEBUG] Application deadline trovato: {application_deadline}"})
                         break
@@ -89,50 +88,95 @@ def parse_list_page(html):
             "dates": dates,
             "location": location,
             "application_deadline": application_deadline,
-            "detail_url": url,
+            "detail_url": url
         })
-        socketio.emit("log", {"message": f"[DEBUG] Evento lista aggiunto: {title}, deadline: {application_deadline}, url: {url}"})
+        socketio.emit("log", {"message": f"[DEBUG] Evento lista aggiunto: {title}, deadline: {application_deadline}"})
+
+    # METODO 2: cerca tutti i link diretti se non trovati
+    for link in soup.select("a[href*='/tools/european-training-calendar/training/']"):
+        title = link.get_text(strip=True)
+        if not title: continue
+        detail_url = link.get("href","").strip()
+        if detail_url and not detail_url.startswith("http"): detail_url = BASE_URL + detail_url
+        if detail_url in seen_urls: continue
+        seen_urls.add(detail_url)
+
+        container = link.find_parent()
+        for _ in range(4):
+            if container and container.name not in ["body","html"]: container=container.parent
+        text_block = container.get_text("\n",strip=True) if container else ""
+        lines = [l.strip() for l in text_block.split("\n") if l.strip()]
+
+        try: idx = lines.index(title)
+        except ValueError: idx = 0
+
+        type_ = lines[idx-1] if idx>0 else ""
+        dates = lines[idx+1] if idx+1<len(lines) else ""
+        location = lines[idx+2] if idx+2<len(lines) else ""
+        application_deadline = ""
+
+        # Cerca callout-module
+        callouts = container.find_all("div", class_="callout-module") if container else []
+        for callout in callouts:
+            p_tags = callout.find_all("p")
+            for i,p in enumerate(p_tags):
+                if "Application deadline" in p.get_text(strip=True):
+                    if i+1<len(p_tags):
+                        application_deadline = p_tags[i+1].get_text(strip=True)
+                        socketio.emit("log", {"message": f"[DEBUG] Application deadline trovato: {application_deadline}"})
+                        break
+            if application_deadline: break
+
+        events.append({
+            "title": title,
+            "type": type_,
+            "dates": dates,
+            "location": location,
+            "application_deadline": application_deadline,
+            "detail_url": detail_url
+        })
+        socketio.emit("log", {"message": f"[DEBUG] Evento lista aggiunto: {title}, deadline: {application_deadline}"})
 
     return events
 
 
 def parse_detail_page(html, detail_url):
-    soup = BeautifulSoup(html, "html.parser")
-    socketio.emit("log", {"message": f"[DEBUG] Parsing dettaglio evento: {detail_url}"})
+    soup = BeautifulSoup(html,"html.parser")
+    socketio.emit("log", {"message": f"[DEBUG] Parsing dettaglio: {detail_url}"})
 
     # ---------- Training description ----------
     training_description = ""
     desc_div = soup.find("div", class_="training-description")
     if desc_div:
-        training_description = desc_div.get_text("\n", strip=True)
+        training_description = desc_div.get_text("\n",strip=True)
         socketio.emit("log", {"message": f"[DEBUG] Training description trovata, lunghezza: {len(training_description)}"})
     else:
         socketio.emit("log", {"message": f"[DEBUG] Training description NON trovata"})
 
     # ---------- Training overview ----------
-    training_overview = ""
+    training_overview=""
     h3_overview = soup.find(lambda tag: tag.name in ["h3","h4"] and "Training overview" in tag.get_text())
     if h3_overview:
-        parts = []
+        parts=[]
         for sib in h3_overview.find_next_siblings():
             if sib.name and sib.name.startswith("h"): break
-            parts.append(sib.get_text("\n", strip=True))
-        training_overview = "\n".join(parts).strip()
+            parts.append(sib.get_text("\n",strip=True))
+        training_overview="\n".join(parts).strip()
 
     participants_no = participants_from = recommended_for = working_lang = organiser = ""
     lines = [l.strip() for l in training_overview.splitlines() if l.strip()]
-    i = 0
-    while i < len(lines):
+    i=0
+    while i<len(lines):
         line = lines[i].lower()
-        if line == "for" and i+1 < len(lines) and "participants" in lines[i+1].lower():
+        if line=="for" and i+1<len(lines) and "participants" in lines[i+1].lower():
             participants_no = lines[i+1].replace("participants","").strip()
-            j = i+2
-            countries = []
-            while j < len(lines):
-                if lines[j].lower() == "from": j+=1; continue
+            j=i+2
+            countries=[]
+            while j<len(lines):
+                if lines[j].lower()=="from": j+=1; continue
                 if lines[j].lower().startswith("and recommended"): break
                 countries.append(lines[j]); j+=1
-            participants_from = " ".join(countries).strip()
+            participants_from=" ".join(countries).strip()
             i=j; continue
         if "and recommended for" in line and i+1<len(lines):
             recommended_for = lines[i+1].strip()
@@ -159,7 +203,7 @@ def parse_detail_page(html, detail_url):
     travel_reimbursement = section_after_heading("Travel reimbursement")
 
     # Available downloads
-    infopack_downloads = ""
+    infopack_downloads=""
     for tag in soup.find_all(['h3','h4','h5','strong','b','p']):
         if "Available downloads:" in tag.get_text():
             for sib in tag.find_next_siblings():
@@ -167,12 +211,12 @@ def parse_detail_page(html, detail_url):
                 first_link = sib.find("a", href=True)
                 if first_link:
                     href = first_link["href"]
-                    if not href.startswith("http"): href = BASE_URL+href
+                    if not href.startswith("http"): href = BASE_URL + href
                     infopack_downloads = href
                     break
             if infopack_downloads: break
 
-    application_procedure_url = ""
+    application_procedure_url=""
     for link in soup.find_all("a", href=True):
         if "/application-procedure/" in link["href"]:
             href = link["href"]
@@ -206,7 +250,7 @@ def get_external_application_link(application_procedure_url):
         if ext_link and ext_link.get("href"): return ext_link["href"]
         for a in soup.find_all("a", href=True):
             href = a["href"]
-            if any(domain in href for domain in ["forms.gle","google.com/forms","typeform.com","surveymonkey.com","jotform.com"]):
+            if any(domain in href for domain in ["forms.gle","google.com/forms","typeform.com","typeform.com","surveymonkey.com","jotform.com"]):
                 return href
         return ""
     except Exception as e:
@@ -235,14 +279,14 @@ def save_csv_to_file():
 
 def scrape_events(max_pages:int):
     global scraped_data
-    scraped_data = []
+    scraped_data=[]
     session = requests.Session()
     session.headers.update({"User-Agent":"Mozilla/5.0"})
-    events_dict = {}
-    page = 0
-    page_size = 10
+    events_dict={}
+    page=0
+    page_size=10
 
-    while page < max_pages:
+    while page<max_pages:
         offset = page*page_size
         socketio.emit("log", {"message": f"[DEBUG] Caricamento pagina {page+1} (offset={offset})..."})
         try:
@@ -267,7 +311,7 @@ def scrape_events(max_pages:int):
     socketio.emit("log", {"message": f"[DEBUG] Totale eventi trovati in lista: {len(scraped_data)}"})
 
     # Dettagli
-    for i, event in enumerate(scraped_data,start=1):
+    for i,event in enumerate(scraped_data,start=1):
         detail_url = event.get("detail_url","")
         if not detail_url: continue
         socketio.emit("log", {"message": f"[DEBUG] [{i}/{len(scraped_data)}] Visita dettaglio: {detail_url}"})
