@@ -5,11 +5,49 @@
 <title>SALTO Youth Scraper</title>
 <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 <style>
-body{font-family:sans-serif;background:#f0f0f0;display:flex;justify-content:center;align-items:center;height:100vh}
-.container{background:#fff;padding:40px;border-radius:16px;width:700px}
-input{width:120px;padding:8px;text-align:center}
-button{padding:10px 20px;border-radius:30px;border:none;background:#667eea;color:#fff;font-weight:600}
-#log{background:#111;color:#0f0;height:300px;overflow:auto;padding:10px;margin-top:15px}
+body {
+    font-family: sans-serif;
+    background: #f0f0f0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+}
+.container {
+    background: #fff;
+    padding: 40px;
+    border-radius: 16px;
+    width: 700px;
+}
+input {
+    width: 120px;
+    padding: 8px;
+    text-align: center;
+    margin-right: 10px;
+}
+button {
+    padding: 10px 20px;
+    border-radius: 30px;
+    border: none;
+    background: #667eea;
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+    margin-right: 10px;
+}
+button:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+}
+#log {
+    background: #111;
+    color: #0f0;
+    height: 300px;
+    overflow: auto;
+    padding: 10px;
+    margin-top: 15px;
+    font-family: monospace;
+}
 </style>
 </head>
 <body>
@@ -24,8 +62,8 @@ Eventi:
 <input id="events" type="number" value="50" min="1">
 </p>
 
-<button onclick="start()">Avvia scraping</button>
-<button onclick="download()" id="dl" disabled>Scarica CSV</button>
+<button id="startBtn">Avvia scraping</button>
+<button id="dl" onclick="download()" disabled>Scarica CSV</button>
 
 <div id="log"></div>
 </div>
@@ -34,29 +72,39 @@ Eventi:
 const socket = io();
 const log = document.getElementById("log");
 const dl = document.getElementById("dl");
+const startBtn = document.getElementById("startBtn");
 
 function add(msg){
-  log.innerHTML += msg + "<br>";
-  log.scrollTop = log.scrollHeight;
+    log.innerHTML += msg + "<br>";
+    log.scrollTop = log.scrollHeight;
 }
 
 function start(){
-  log.innerHTML="";
-  dl.disabled=true;
-  socket.emit("start_scraping",{
-    max_pages: document.getElementById("pages").value,
-    max_events: document.getElementById("events").value
-  });
+    log.innerHTML = "";
+    dl.disabled = true;
+    startBtn.disabled = true;
+
+    const max_pages = parseInt(document.getElementById("pages").value);
+    const max_events = parseInt(document.getElementById("events").value);
+
+    socket.emit("start_scraping", { max_pages, max_events });
 }
 
 function download(){
-  window.location="/download_csv";
+    window.location="/download_csv";
 }
 
+// Event listener per bottone
+startBtn.addEventListener("click", start);
+
+// SocketIO log
 socket.on("log", d => add(d.message));
+
+// Quando lo scraping è completato
 socket.on("scraping_done", d => {
-  add("Completato: "+d.count+" eventi");
-  dl.disabled=false;
+    add("Completato: " + d.count + " eventi");
+    dl.disabled = false;
+    startBtn.disabled = false;
 });
 </script>
 
