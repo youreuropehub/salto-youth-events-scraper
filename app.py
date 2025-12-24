@@ -10,6 +10,7 @@ from flask import Flask, render_template, jsonify, send_file
 from flask_socketio import SocketIO, emit
 from bs4 import BeautifulSoup
 import re
+import requests
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -35,6 +36,30 @@ def setup_selenium():
     driver = webdriver.Chrome(options=chrome_options)
     return driver
 
+# ================== Helper functions ==================
+
+def get_text_or_empty(soup, selector):
+    tag = soup.select_one(selector)
+    return tag.get_text(" ", strip=True) if tag else ""
+
+def get_application_form_link(application_procedure_url):
+    if not application_procedure_url:
+        return ""
+    try:
+        resp = requests.get(application_procedure_url, timeout=10)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        external_link = soup.find("a", string=re.compile(r"Proceed to the external", re.IGNORECASE))
+        if external_link and external_link.get("href"):
+            return external_link["href"]
+        for a in soup.find_all("a", href=True):
+            if any(domain in a["href"] for domain in ["forms.gle","google.com/forms","typeform.com","surveymonkey.com","jotform.com"]):
+                return a["href"]
+        return ""
+    except Exception as e:
+        print(f"Errore fetching application link: {e}")
+        return ""
+
 # ================== Scraper ==================
 
 def scrape_events(max_pages=5):
@@ -44,7 +69,7 @@ def scrape_events(max_pages=5):
     socketio.emit("log", {"message": "Avvio scraping con Selenium..."})
     driver = setup_selenium()
     driver.get(ETC_URL)
-    time.sleep(5)  # attendi caricamento JS
+    time.sleep(5)
 
     # Scorri pagine
     for _ in range(max_pages - 1):
@@ -70,16 +95,11 @@ def scrape_events(max_pages=5):
             if not detail_url.startswith("http"):
                 detail_url = BASE_URL + detail_url
 
-            type_ = item.select_one(".tool-item-category")
-            type_text = type_.text.strip() if type_ else ""
+            type_ = get_text_or_empty(item, ".tool-item-category")
+            dates_text = get_text_or_empty(item, ".training-dates")
+            location_text = get_text_or_empty(item, ".training-location")
 
-            dates = item.select_one(".training-dates")
-            dates_text = dates.text.strip() if dates else ""
-
-            location = item.select_one(".training-location")
-            location_text = location.text.strip() if location else ""
-
-            # Application deadline nella lista
+            # Application deadline dalla lista
             deadline_text = ""
             match_deadline = item.find(string=re.compile(r"Application deadline", re.IGNORECASE))
             if match_deadline:
@@ -90,23 +110,100 @@ def scrape_events(max_pages=5):
             time.sleep(3)
             det_soup = BeautifulSoup(driver.page_source, "html.parser")
 
-            summary_tag = det_soup.select_one(".training-summary")
-            training_summary = summary_tag.get_text(" ", strip=True) if summary_tag else ""
+            # Training overview fields
+            training_summary = get_text_or_empty(det_soup, ".training-summary")
+            training_description = get_text_or_empty(det_soup, ".training-description")
 
-            desc_tag = det_soup.select_one(".training-description")
-            training_description = desc_tag.get_text(" ", strip=True) if desc_tag else ""
+            participants_no = participants_from = recommended_for = working_lang = organiser = ""
+            # Training overview parsing
+            overview_header = det_soup.find(lambda tag: tag.name in ["h3", "h4"] and "Training overview" in tag.text)
+            if overview_header:
+                lines = [l.strip() for l in overview_header.find_next_siblings(text=True)]
+                for line in lines:
+                    if "participants" in line.lower():
+                        participants_no = line.replace("participants", "").strip()
+                    if "from" in line.lower():
+                        participants_from = line.replace("from", "").strip()
+                    if "recommended for" in line.lower():
+                        recommended_for = line.split("recommended for")[-1].strip()
+            # Working language & organiser
+            wl_tag = det_soup.find(lambda tag: tag.name and "Working language" in tag.text)
+            if wl_tag:
+                working_lang = wl_tag.get_text(" ", strip=True).split(":",1)[-1].strip()
+            org_tag = det_soup.find(lambda tag: tag.name and "Organiser" in tag.text)
+            if org_tag:
+                organiser = org_tag.get_text(" ", strip=True).split(":",1)[-1].strip()
+
+            # Accessibility
+            accessibility = ""
+            acc_tag = det_soup.find(lambda tag: tag.name in ["h3","h4"] and "Accessibility info" in tag.text)
+            if acc_tag:
+                parts = []
+                for sib in acc_tag.find_next_siblings():
+                    if sib.name and sib.name.startswith("h"):
+                        break
+                    parts.append(sib.get_text(" ", strip=True))
+                accessibility = " ".join(parts).strip()
+
+            # Costs sections
+            def section_after_heading(text):
+                h = det_soup.find(lambda tag: tag.name in ["h3","h4"] and text in tag.text)
+                if not h:
+                    return ""
+                parts = []
+                for sib in h.find_next_siblings():
+                    if sib.name and sib.name.startswith("h"):
+                        break
+                    parts.append(sib.get_text(" ", strip=True))
+                return " ".join(parts).strip()
+
+            participation_fee = section_after_heading("Participation fee")
+            accommodation_food = section_after_heading("Accommodation and food")
+            travel_reimbursement = section_after_heading("Travel reimbursement")
+
+            # Infopack downloads
+            infopack_downloads = ""
+            downloads_heading = next((tag for tag in det_soup.find_all(['h3','h4','h5','strong','b','p']) if "Available downloads:" in tag.text), None)
+            if downloads_heading:
+                a_tag = downloads_heading.find_next("a", href=True)
+                if a_tag:
+                    infopack_downloads = a_tag["href"]
+                    if not infopack_downloads.startswith("http"):
+                        infopack_downloads = BASE_URL + infopack_downloads
+
+            # Application procedure
+            application_procedure_url = ""
+            for link in det_soup.find_all("a", href=True):
+                if "/application-procedure/" in link["href"]:
+                    application_procedure_url = link["href"]
+                    if not application_procedure_url.startswith("http"):
+                        application_procedure_url = BASE_URL + application_procedure_url
+                    break
+            application_form_link = get_application_form_link(application_procedure_url)
 
             scraped_data.append({
                 "title": title,
-                "type": type_text,
+                "type": type_,
                 "dates": dates_text,
                 "location": location_text,
                 "application_deadline": deadline_text,
                 "training_summary": training_summary,
                 "training_description": training_description,
+                "participants_no": participants_no,
+                "participants_from": participants_from,
+                "recommended_for": recommended_for,
+                "working_language": working_lang,
+                "organiser": organiser,
+                "accessibility": accessibility,
+                "participation_fee": participation_fee,
+                "accommodation_food": accommodation_food,
+                "travel_reimbursement": travel_reimbursement,
+                "infopack_downloads": infopack_downloads,
+                "application_procedure_url": application_procedure_url,
+                "application_form_link": application_form_link,
                 "detail_url": detail_url
             })
-            socketio.emit("log", {"message": f"[{idx}] {title}"})
+            socketio.emit("log", {"message": f"[{idx}/{len(items)}] {title}"})
 
         except Exception as e:
             socketio.emit("log", {"message": f"Errore evento {title if 'title' in locals() else idx}: {e}"})
@@ -118,7 +215,11 @@ def scrape_events(max_pages=5):
     csv_path = os.path.join(OUTPUT_DIR, "salto_events_complete.csv")
     fieldnames = [
         "title","type","dates","location","application_deadline",
-        "training_summary","training_description","detail_url"
+        "training_summary","training_description","participants_no",
+        "participants_from","recommended_for","working_language",
+        "organiser","accessibility","participation_fee",
+        "accommodation_food","travel_reimbursement",
+        "infopack_downloads","application_procedure_url","application_form_link","detail_url"
     ]
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -146,7 +247,11 @@ def download_csv():
     text_buffer = StringIO()
     fieldnames = [
         "title","type","dates","location","application_deadline",
-        "training_summary","training_description","detail_url"
+        "training_summary","training_description","participants_no",
+        "participants_from","recommended_for","working_language",
+        "organiser","accessibility","participation_fee",
+        "accommodation_food","travel_reimbursement",
+        "infopack_downloads","application_procedure_url","application_form_link","detail_url"
     ]
     writer = csv.DictWriter(text_buffer, fieldnames=fieldnames)
     writer.writeheader()
