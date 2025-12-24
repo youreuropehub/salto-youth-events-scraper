@@ -8,7 +8,7 @@ import csv
 import re
 from io import StringIO, BytesIO
 from datetime import date
-from flask import Flask, render_template, jsonify, send_file
+from flask import Flask, render_template, jsonify, send_file, request
 from flask_socketio import SocketIO, emit
 from bs4 import BeautifulSoup
 import requests
@@ -25,7 +25,6 @@ OUTPUT_DIR = "output"
 def build_search_url(offset: int) -> str:
     today = date.today()
     day, month, year = today.day, today.month, today.year
-
     base = (
         "https://www.salto-youth.net/tools/european-training-calendar/browse/"
         "?b_offset={offset}&b_limit=10"
@@ -38,11 +37,11 @@ def build_search_url(offset: int) -> str:
 
 
 def parse_list_page(html):
+    """Estrazione degli eventi da pagina lista"""
     soup = BeautifulSoup(html, "html.parser")
     seen_urls = set()
     events = []
 
-    # Metodo 1: <h3> con link
     for h3 in soup.find_all("h3"):
         a = h3.find("a")
         if not a:
@@ -57,6 +56,7 @@ def parse_list_page(html):
 
         block = h3.parent
         lines = [l.strip() for l in block.get_text("\n", strip=True).split("\n") if l.strip()]
+
         try:
             idx = lines.index(title)
         except ValueError:
@@ -83,7 +83,7 @@ def parse_list_page(html):
             "detail_url": url
         })
 
-    # Metodo 2: link diretto
+    # Metodo aggiuntivo per link diretti
     for link in soup.select("a[href*='/tools/european-training-calendar/training/']"):
         title = link.get_text(strip=True)
         if not title:
@@ -114,8 +114,13 @@ def parse_list_page(html):
         if idx + 2 < len(lines):
             location = lines[idx + 2]
         for i, line in enumerate(lines):
-            if "Application deadline" in line and i + 1 < len(lines):
-                app_deadline = lines[i + 1]
+            if "Application deadline" in line:
+                parts = line.split(":", 1)
+                if len(parts) > 1:
+                    app_deadline = parts[1].strip()
+                else:
+                    if i + 1 < len(lines):
+                        app_deadline = lines[i + 1].strip()
                 break
 
         events.append({
@@ -131,12 +136,12 @@ def parse_list_page(html):
 
 
 def parse_detail_page(html, detail_url):
+    """Parsing dettagli evento"""
     soup = BeautifulSoup(html, "html.parser")
 
     # ================== APPLICATION DEADLINE ==================
     application_deadline = ""
-    call_addendum_elements = soup.select(".call-addendum")
-    for el in call_addendum_elements:
+    for el in soup.select(".call-addendum"):
         text = el.get_text(separator=" ", strip=True)
         if ":" in text:
             label, value = text.split(":", 1)
@@ -275,7 +280,6 @@ def get_external_application_link(application_procedure_url):
         print(f"Error fetching application link from {application_procedure_url}: {e}")
         return ""
 
-
 # ================== CSV SAVE ==================
 def save_csv_to_file():
     if not scraped_data:
@@ -299,7 +303,7 @@ def save_csv_to_file():
 
 
 # ================== SCRAPER ==================
-def scrape_events():
+def scrape_events(max_pages=50, max_events=None):
     global scraped_data
     scraped_data = []
 
@@ -312,7 +316,8 @@ def scrape_events():
     socketio.emit("log", {"message": "Inizio scraping pagine lista..."})
 
     events_dict = {}
-    page, max_pages, page_size = 0, 50, 10
+    page_size = 10
+    page = 0
 
     while page < max_pages:
         offset = page * page_size
@@ -323,8 +328,7 @@ def scrape_events():
             resp = session.get(url, timeout=15)
             resp.raise_for_status()
         except Exception as e:
-            err = f"Errore caricamento pagina {page + 1}: {e}"
-            socketio.emit("log", {"message": err})
+            socketio.emit("log", {"message": f"Errore caricamento pagina {page + 1}: {e}"})
             break
 
         events = parse_list_page(resp.text)
@@ -335,6 +339,11 @@ def scrape_events():
             detail_url = event.get("detail_url", "")
             if detail_url and detail_url not in events_dict:
                 events_dict[detail_url] = event
+                if max_events and len(events_dict) >= max_events:
+                    break
+        if max_events and len(events_dict) >= max_events:
+            break
+
         page += 1
         time.sleep(1)
 
@@ -378,8 +387,10 @@ def index():
 
 @socketio.on("start_scraping")
 def handle_start_scraping(message=None):
-    emit("log", {"message": "Avvio scraping..."})
-    scrape_events()
+    max_pages = int(message.get("max_pages", 50)) if message else 50
+    max_events = int(message.get("max_events")) if message and message.get("max_events") else None
+    emit("log", {"message": f"Avvio scraping... max_pages={max_pages}, max_events={max_events}"})
+    scrape_events(max_pages=max_pages, max_events=max_events)
 
 
 @app.route("/download_csv")
@@ -406,7 +417,9 @@ def download_csv():
 
 @app.route("/api/scrape", methods=["POST", "GET"])
 def api_scrape():
-    scrape_events()
+    max_pages = int(request.args.get("max_pages", 50))
+    max_events = int(request.args.get("max_events")) if request.args.get("max_events") else None
+    scrape_events(max_pages=max_pages, max_events=max_events)
     return jsonify({
         "status": "ok",
         "count": len(scraped_data),
@@ -417,7 +430,9 @@ def api_scrape():
 
 @app.route("/api/scrape_and_download", methods=["POST", "GET"])
 def api_scrape_and_download():
-    scrape_events()
+    max_pages = int(request.args.get("max_pages", 50))
+    max_events = int(request.args.get("max_events")) if request.args.get("max_events") else None
+    scrape_events(max_pages=max_pages, max_events=max_events)
     if not scraped_data:
         return jsonify({"status":"error","message":"Nessun dato trovato"}),400
     text_buffer = StringIO()
