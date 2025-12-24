@@ -22,6 +22,8 @@ scraped_data = []
 OUTPUT_DIR = "output"
 
 
+# ================== FUNZIONI ==================
+
 def build_search_url(offset: int) -> str:
     today = date.today()
     day, month, year = today.day, today.month, today.year
@@ -294,7 +296,7 @@ def save_csv_to_file():
     socketio.emit("log", {"message": f"CSV salvato in {csv_path}"})
 
 
-def scrape_events():
+def scrape_events(max_pages=50, page_size=10):
     global scraped_data
     scraped_data = []
 
@@ -307,7 +309,7 @@ def scrape_events():
     socketio.emit("log", {"message": "Inizio scraping pagine lista..."})
 
     events_dict = {}
-    page, max_pages, page_size = 0, 50, 10
+    page = 0
 
     while page < max_pages:
         offset = page * page_size
@@ -372,9 +374,10 @@ def index():
 
 
 @socketio.on("start_scraping")
-def handle_start_scraping():
-    emit("log", {"message": "Avvio scraping..."})  # ← fix bottone
-    scrape_events()
+def handle_start_scraping(data):
+    emit("log", {"message": "Avvio scraping..."})
+    max_pages = int(data.get("max_pages", 50)) if isinstance(data, dict) else 50
+    scrape_events(max_pages=max_pages)
 
 
 @app.route("/download_csv")
