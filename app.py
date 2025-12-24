@@ -5,7 +5,6 @@ monkey.patch_all()
 import os
 import time
 import csv
-import re
 from io import StringIO, BytesIO
 from datetime import date
 from flask import Flask, render_template, jsonify, send_file
@@ -25,16 +24,14 @@ OUTPUT_DIR = "output"
 def build_search_url(offset: int) -> str:
     today = date.today()
     day, month, year = today.day, today.month, today.year
-
-    base = (
-        "https://www.salto-youth.net/tools/european-training-calendar/browse/"
-        "?b_offset={offset}&b_limit=10"
-        "&b_order=applicationDeadline"
-        "&b_keyword="
-        "&b_begin_date_after_day={day}&b_begin_date_after_month={month}&b_begin_date_after_year={year}"
-        "&b_application_deadline_after_day={day}&b_application_deadline_after_month={month}&b_application_deadline_after_year={year}"
+    return (
+        f"https://www.salto-youth.net/tools/european-training-calendar/browse/"
+        f"?b_offset={offset}&b_limit=10"
+        f"&b_order=applicationDeadline"
+        f"&b_keyword="
+        f"&b_begin_date_after_day={day}&b_begin_date_after_month={month}&b_begin_date_after_year={year}"
+        f"&b_application_deadline_after_day={day}&b_application_deadline_after_month={month}&b_application_deadline_after_year={year}"
     )
-    return base.format(offset=offset, day=day, month=month, year=year)
 
 
 def parse_list_page(html):
@@ -42,19 +39,19 @@ def parse_list_page(html):
     events = []
     seen_urls = set()
 
-    for article in soup.select("article.training-item"):
+    for article in soup.select(".search-result-list .tool-item"):
         title_tag = article.select_one("h2 a")
         if not title_tag:
             continue
         title = title_tag.get_text(strip=True)
-        url = title_tag.get("href")
+        url = title_tag.get("href", "")
         if url and not url.startswith("http"):
             url = BASE_URL + url
         if url in seen_urls:
             continue
         seen_urls.add(url)
 
-        type_ = article.select_one(".training-type")
+        type_ = article.select_one(".tool-item-category")
         type_ = type_.get_text(strip=True) if type_ else ""
 
         dates = article.select_one(".training-dates")
@@ -63,7 +60,6 @@ def parse_list_page(html):
         location = article.select_one(".training-location")
         location = location.get_text(strip=True) if location else ""
 
-        # Application deadline, presente nella lista
         app_deadline = ""
         deadline_tag = article.find(lambda tag: "Application deadline" in tag.get_text())
         if deadline_tag:
@@ -86,18 +82,15 @@ def parse_detail_page(html, detail_url):
     # Summary e description
     summary = ""
     description = ""
-    proj_idea = soup.find(lambda tag: tag.name == "p" and "Project idea" in tag.get_text())
-    if proj_idea:
-        desc_list = []
-        for sib in proj_idea.find_next_siblings():
-            if sib.name == "h3":
-                break
-            desc_list.append(sib.get_text(" ", strip=True))
-        description = " ".join(desc_list).strip()
-        summary = description.split(".")[0] + "." if description else ""
+    sum_section = soup.select_one(".training-summary")
+    desc_section = soup.select_one(".training-description")
+    if sum_section:
+        summary = sum_section.get_text(" ", strip=True)
+    if desc_section:
+        description = desc_section.get_text(" ", strip=True)
 
     # Training overview
-    participants_no = participants_from = recommended_for = working_lang = organiser = ""
+    participants_no = participants_from = recommended_for = working_language = organiser = ""
     overview_h3 = soup.find(lambda tag: tag.name == "h3" and "Training overview" in tag.get_text())
     if overview_h3:
         overview_text = "\n".join([sib.get_text(" ", strip=True) for sib in overview_h3.find_next_siblings() if sib.name != "h3"])
@@ -105,13 +98,13 @@ def parse_detail_page(html, detail_url):
         for i, line in enumerate(lines):
             low = line.lower()
             if "participants" in low and participants_no == "":
-                participants_no = re.sub(r"[^\d\-]", "", line)
+                participants_no = line
             elif "from" in low:
                 participants_from = line.split("from", 1)[-1].strip()
             elif "recommended for" in low:
                 recommended_for = line.split("recommended for", 1)[-1].strip()
             elif "working language" in low:
-                working_lang = line.split(":", 1)[-1].strip()
+                working_language = line.split(":", 1)[-1].strip()
             elif "organiser" in low:
                 organiser = line.split(":", 1)[-1].strip()
 
@@ -133,7 +126,7 @@ def parse_detail_page(html, detail_url):
 
     # Downloads
     infopack_downloads = ""
-    downloads_heading = next((tag for tag in soup.find_all(['h3', 'h4', 'strong', 'b', 'p']) if "Available downloads:" in tag.get_text()), None)
+    downloads_heading = next((tag for tag in soup.find_all(['h3', 'h4', 'strong', 'b', 'p']) if "Available downloads" in tag.get_text()), None)
     if downloads_heading:
         first_link = downloads_heading.find_next("a", href=True)
         if first_link:
@@ -156,7 +149,7 @@ def parse_detail_page(html, detail_url):
         "participants_no": participants_no,
         "participants_from": participants_from,
         "recommended_for": recommended_for,
-        "working_language": working_lang,
+        "working_language": working_language,
         "organiser": organiser,
         "participation_fee": participation_fee,
         "accommodation_food": accommodation_food,
@@ -177,9 +170,8 @@ def get_external_application_link(application_procedure_url):
         if external_link and external_link.get("href"):
             return external_link["href"]
         for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if any(domain in href for domain in ["forms.gle","google.com/forms","typeform.com","surveymonkey.com","jotform.com"]):
-                return href
+            if any(domain in a["href"] for domain in ["forms.gle", "google.com/forms", "typeform.com", "surveymonkey.com", "jotform.com"]):
+                return a["href"]
         return ""
     except Exception as e:
         print(f"Error fetching application link from {application_procedure_url}: {e}")
@@ -203,7 +195,6 @@ def save_csv_to_file():
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(scraped_data)
-    print(f"DEBUG: CSV salvato in {csv_path}")
     socketio.emit("log", {"message": f"CSV salvato in {csv_path}"})
 
 
@@ -212,10 +203,7 @@ def scrape_events(max_pages=5, max_events=50):
     scraped_data = []
 
     session = requests.Session()
-    session.headers.update({
-        "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                     "(KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-    })
+    session.headers.update({"User-Agent":"Mozilla/5.0"})
 
     socketio.emit("log", {"message": "Inizio scraping pagine lista..."})
 
@@ -224,14 +212,13 @@ def scrape_events(max_pages=5, max_events=50):
 
     for page in range(max_pages):
         offset = page * page_size
-        msg = f"Caricamento pagina {page + 1} (offset={offset})..."
-        socketio.emit("log", {"message": msg})
+        socketio.emit("log", {"message": f"Caricamento pagina {page+1} (offset={offset})..."})
         try:
             url = build_search_url(offset)
             resp = session.get(url, timeout=15)
             resp.raise_for_status()
         except Exception as e:
-            socketio.emit("log", {"message": f"Errore caricamento pagina {page + 1}: {e}"})
+            socketio.emit("log", {"message": f"Errore caricamento pagina {page+1}: {e}"})
             break
 
         events = parse_list_page(resp.text)
@@ -293,40 +280,6 @@ def handle_start_scraping(data=None):
 def download_csv():
     if not scraped_data:
         return "Nessun dato disponibile", 400
-    text_buffer = StringIO()
-    fieldnames = [
-        "title","type","dates","location","application_deadline",
-        "summary","description",
-        "participants_no","participants_from","recommended_for","working_language","organiser",
-        "participation_fee","accommodation_food","travel_reimbursement",
-        "infopack_downloads","application_procedure_url","application_form_link","detail_url"
-    ]
-    writer = csv.DictWriter(text_buffer, fieldnames=fieldnames)
-    writer.writeheader()
-    for row in scraped_data:
-        writer.writerow(row)
-    bytes_buffer = BytesIO(text_buffer.getvalue().encode("utf-8"))
-    bytes_buffer.seek(0)
-    return send_file(bytes_buffer, mimetype="text/csv; charset=utf-8",
-                     as_attachment=True, download_name="salto_events_complete.csv")
-
-
-@app.route("/api/scrape", methods=["POST", "GET"])
-def api_scrape():
-    scrape_events()
-    return jsonify({
-        "status": "ok",
-        "count": len(scraped_data),
-        "csv_path": f"{OUTPUT_DIR}/salto_events_complete.csv",
-        "message": "Scraping completato. CSV salvato."
-    })
-
-
-@app.route("/api/scrape_and_download", methods=["POST", "GET"])
-def api_scrape_and_download():
-    scrape_events()
-    if not scraped_data:
-        return jsonify({"status":"error","message":"Nessun dato trovato"}),400
     text_buffer = StringIO()
     fieldnames = [
         "title","type","dates","location","application_deadline",
