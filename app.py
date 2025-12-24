@@ -135,8 +135,9 @@ def parse_list_page(html):
 def parse_detail_page(html, detail_url):
     soup = BeautifulSoup(html, "html.parser")
 
-    # Training overview
-    training_overview = ""
+    # ================== TRAINING OVERVIEW ==================
+    training_summary = ""
+    training_description = ""
     h3_overview = soup.find(lambda tag: tag.name in ["h3", "h4"] and "Training overview" in tag.get_text())
     if h3_overview:
         parts = []
@@ -144,10 +145,13 @@ def parse_detail_page(html, detail_url):
             if sib.name and sib.name.startswith("h"):
                 break
             parts.append(sib.get_text("\n", strip=True))
-        training_overview = "\n".join(parts).strip()
+        full_text = "\n".join(parts).strip()
+        training_summary = full_text.split("\n")[0] if full_text else ""
+        training_description = full_text
 
+    # ================== PARTICIPANTS, LANGUAGE, ORGANISER ==================
     participants_no = participants_from = recommended_for = working_lang = organiser = ""
-    lines = [l.strip() for l in training_overview.splitlines() if l.strip()]
+    lines = [l.strip() for l in training_description.splitlines() if l.strip()]
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -177,7 +181,7 @@ def parse_detail_page(html, detail_url):
             organiser = after if after else (lines[i + 1].strip() if i + 1 < len(lines) else "")
         i += 1
 
-    # Accessibility
+    # ================== ACCESSIBILITY ==================
     accessibility = ""
     h_acc = soup.find(lambda tag: tag.name in ["h3", "h4"] and "Accessibility info" in tag.get_text())
     if h_acc:
@@ -188,7 +192,7 @@ def parse_detail_page(html, detail_url):
             parts.append(sib.get_text(" ", strip=True))
         accessibility = " ".join(parts).strip()
 
-    # Costs
+    # ================== COSTS ==================
     def section_after_heading(text):
         h = soup.find(lambda tag: tag.name in ["h3", "h4"] and text in tag.get_text())
         if not h:
@@ -204,7 +208,7 @@ def parse_detail_page(html, detail_url):
     accommodation_food = section_after_heading("Accommodation and food")
     travel_reimbursement = section_after_heading("Travel reimbursement")
 
-    # Available downloads
+    # ================== AVAILABLE DOWNLOADS ==================
     infopack_downloads = ""
     downloads_heading = next((tag for tag in soup.find_all(['h3', 'h4', 'h5', 'strong', 'b', 'p']) if "Available downloads:" in tag.get_text()), None)
     if downloads_heading:
@@ -216,23 +220,8 @@ def parse_detail_page(html, detail_url):
                 href = first_link["href"]
                 infopack_downloads = href if href.startswith("http") else BASE_URL + href
                 break
-    if not infopack_downloads:
-        for element in soup.find_all(string=re.compile(r"Available downloads:")):
-            parent = element.parent
-            for link in parent.find_next_siblings():
-                if link.name == "a" and link.get("href"):
-                    href = link["href"]
-                    infopack_downloads = href if href.startswith("http") else BASE_URL + href
-                    break
-                first_a = link.find("a", href=True)
-                if first_a:
-                    href = first_a["href"]
-                    infopack_downloads = href if href.startswith("http") else BASE_URL + href
-                    break
-            if infopack_downloads:
-                break
 
-    # Application procedure URL
+    # ================== APPLICATION PROCEDURE URL ==================
     application_procedure_url = ""
     for link in soup.find_all("a", href=True):
         if "/application-procedure/" in link["href"]:
@@ -252,6 +241,8 @@ def parse_detail_page(html, detail_url):
         "travel_reimbursement": travel_reimbursement,
         "infopack_downloads": infopack_downloads,
         "application_procedure_url": application_procedure_url,
+        "training_summary": training_summary,
+        "training_description": training_description
     }
 
 
@@ -283,6 +274,7 @@ def save_csv_to_file():
     csv_path = os.path.join(OUTPUT_DIR, "salto_events_complete.csv")
     fieldnames = [
         "title","type","dates","location","application_deadline",
+        "training_summary","training_description",
         "participants_no","participants_from","recommended_for",
         "accessibility","working_language","organiser",
         "participation_fee","accommodation_food","travel_reimbursement",
@@ -347,17 +339,20 @@ def scrape_events(max_pages=50, page_size=10):
             resp = session.get(detail_url, timeout=15)
             resp.raise_for_status()
             detail = parse_detail_page(resp.text, detail_url)
-            if detail["application_procedure_url"]:
-                detail["application_form_link"] = get_external_application_link(detail["application_procedure_url"])
-            else:
-                detail["application_form_link"] = ""
             event.update(detail)
+            # Application form link esterno
+            if detail["application_procedure_url"]:
+                event["application_form_link"] = get_external_application_link(detail["application_procedure_url"])
+            else:
+                event["application_form_link"] = ""
+            # Manteniamo application_deadline dalla lista se presente
+            event["application_deadline"] = event.get("application_deadline") or detail.get("application_deadline", "")
         except Exception as e:
             print(f"DEBUG: errore dettaglio {detail_url}: {e}")
             for key in ["participants_no","participants_from","recommended_for","accessibility",
                         "working_language","organiser","participation_fee","accommodation_food",
                         "travel_reimbursement","infopack_downloads","application_procedure_url",
-                        "application_form_link"]:
+                        "application_form_link","training_summary","training_description"]:
                 event[key] = ""
         time.sleep(1)
 
@@ -387,6 +382,7 @@ def download_csv():
     text_buffer = StringIO()
     fieldnames = [
         "title","type","dates","location","application_deadline",
+        "training_summary","training_description",
         "participants_no","participants_from","recommended_for",
         "accessibility","working_language","organiser",
         "participation_fee","accommodation_food","travel_reimbursement",
@@ -421,6 +417,7 @@ def api_scrape_and_download():
     text_buffer = StringIO()
     fieldnames = [
         "title","type","dates","location","application_deadline",
+        "training_summary","training_description",
         "participants_no","participants_from","recommended_for",
         "accessibility","working_language","organiser",
         "participation_fee","accommodation_food","travel_reimbursement",
