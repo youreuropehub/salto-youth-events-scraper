@@ -22,8 +22,6 @@ scraped_data = []
 OUTPUT_DIR = "output"
 
 
-# ================== FUNZIONI ==================
-
 def build_search_url(offset: int) -> str:
     today = date.today()
     day, month, year = today.day, today.month, today.year
@@ -135,6 +133,17 @@ def parse_list_page(html):
 def parse_detail_page(html, detail_url):
     soup = BeautifulSoup(html, "html.parser")
 
+    # ================== APPLICATION DEADLINE ==================
+    application_deadline = ""
+    call_addendum_elements = soup.select(".call-addendum")
+    for el in call_addendum_elements:
+        text = el.get_text(separator=" ", strip=True)
+        if ":" in text:
+            label, value = text.split(":", 1)
+            if label.strip().lower() == "application deadline":
+                application_deadline = value.strip()
+                break
+
     # ================== TRAINING OVERVIEW ==================
     training_summary = ""
     training_description = ""
@@ -149,7 +158,7 @@ def parse_detail_page(html, detail_url):
         training_summary = full_text.split("\n")[0] if full_text else ""
         training_description = full_text
 
-    # ================== PARTICIPANTS, LANGUAGE, ORGANISER ==================
+    # ================== PARTICIPANTS / ORGANISER ==================
     participants_no = participants_from = recommended_for = working_lang = organiser = ""
     lines = [l.strip() for l in training_description.splitlines() if l.strip()]
     i = 0
@@ -208,7 +217,7 @@ def parse_detail_page(html, detail_url):
     accommodation_food = section_after_heading("Accommodation and food")
     travel_reimbursement = section_after_heading("Travel reimbursement")
 
-    # ================== AVAILABLE DOWNLOADS ==================
+    # ================== DOWNLOADS ==================
     infopack_downloads = ""
     downloads_heading = next((tag for tag in soup.find_all(['h3', 'h4', 'h5', 'strong', 'b', 'p']) if "Available downloads:" in tag.get_text()), None)
     if downloads_heading:
@@ -221,7 +230,7 @@ def parse_detail_page(html, detail_url):
                 infopack_downloads = href if href.startswith("http") else BASE_URL + href
                 break
 
-    # ================== APPLICATION PROCEDURE URL ==================
+    # ================== APPLICATION PROCEDURE ==================
     application_procedure_url = ""
     for link in soup.find_all("a", href=True):
         if "/application-procedure/" in link["href"]:
@@ -230,6 +239,9 @@ def parse_detail_page(html, detail_url):
             break
 
     return {
+        "application_deadline": application_deadline,
+        "training_summary": training_summary,
+        "training_description": training_description,
         "participants_no": participants_no,
         "participants_from": participants_from,
         "recommended_for": recommended_for,
@@ -241,11 +253,9 @@ def parse_detail_page(html, detail_url):
         "travel_reimbursement": travel_reimbursement,
         "infopack_downloads": infopack_downloads,
         "application_procedure_url": application_procedure_url,
-        "training_summary": training_summary,
-        "training_description": training_description
     }
 
-
+# ================== GET EXTERNAL APPLICATION LINK ==================
 def get_external_application_link(application_procedure_url):
     if not application_procedure_url:
         return ""
@@ -266,6 +276,7 @@ def get_external_application_link(application_procedure_url):
         return ""
 
 
+# ================== CSV SAVE ==================
 def save_csv_to_file():
     if not scraped_data:
         print("DEBUG: nessun dato da salvare")
@@ -275,8 +286,7 @@ def save_csv_to_file():
     fieldnames = [
         "title","type","dates","location","application_deadline",
         "training_summary","training_description",
-        "participants_no","participants_from","recommended_for",
-        "accessibility","working_language","organiser",
+        "participants_no","participants_from","recommended_for","accessibility","working_language","organiser",
         "participation_fee","accommodation_food","travel_reimbursement",
         "infopack_downloads","application_procedure_url","application_form_link","detail_url"
     ]
@@ -288,7 +298,8 @@ def save_csv_to_file():
     socketio.emit("log", {"message": f"CSV salvato in {csv_path}"})
 
 
-def scrape_events(max_pages=50, page_size=10):
+# ================== SCRAPER ==================
+def scrape_events():
     global scraped_data
     scraped_data = []
 
@@ -301,7 +312,7 @@ def scrape_events(max_pages=50, page_size=10):
     socketio.emit("log", {"message": "Inizio scraping pagine lista..."})
 
     events_dict = {}
-    page = 0
+    page, max_pages, page_size = 0, 50, 10
 
     while page < max_pages:
         offset = page * page_size
@@ -339,20 +350,18 @@ def scrape_events(max_pages=50, page_size=10):
             resp = session.get(detail_url, timeout=15)
             resp.raise_for_status()
             detail = parse_detail_page(resp.text, detail_url)
-            event.update(detail)
-            # Application form link esterno
             if detail["application_procedure_url"]:
-                event["application_form_link"] = get_external_application_link(detail["application_procedure_url"])
+                detail["application_form_link"] = get_external_application_link(detail["application_procedure_url"])
             else:
-                event["application_form_link"] = ""
-            # Manteniamo application_deadline dalla lista se presente
-            event["application_deadline"] = event.get("application_deadline") or detail.get("application_deadline", "")
+                detail["application_form_link"] = ""
+            event.update(detail)
         except Exception as e:
             print(f"DEBUG: errore dettaglio {detail_url}: {e}")
-            for key in ["participants_no","participants_from","recommended_for","accessibility",
+            for key in ["application_deadline","training_summary","training_description",
+                        "participants_no","participants_from","recommended_for","accessibility",
                         "working_language","organiser","participation_fee","accommodation_food",
                         "travel_reimbursement","infopack_downloads","application_procedure_url",
-                        "application_form_link","training_summary","training_description"]:
+                        "application_form_link"]:
                 event[key] = ""
         time.sleep(1)
 
@@ -362,17 +371,15 @@ def scrape_events(max_pages=50, page_size=10):
 
 
 # ================== ROUTES ==================
-
 @app.route("/")
 def index():
     return render_template("index.html")
 
 
 @socketio.on("start_scraping")
-def handle_start_scraping(data):
+def handle_start_scraping(message=None):
     emit("log", {"message": "Avvio scraping..."})
-    max_pages = int(data.get("max_pages", 50)) if isinstance(data, dict) else 50
-    scrape_events(max_pages=max_pages)
+    scrape_events()
 
 
 @app.route("/download_csv")
@@ -383,8 +390,7 @@ def download_csv():
     fieldnames = [
         "title","type","dates","location","application_deadline",
         "training_summary","training_description",
-        "participants_no","participants_from","recommended_for",
-        "accessibility","working_language","organiser",
+        "participants_no","participants_from","recommended_for","accessibility","working_language","organiser",
         "participation_fee","accommodation_food","travel_reimbursement",
         "infopack_downloads","application_procedure_url","application_form_link","detail_url"
     ]
@@ -418,8 +424,7 @@ def api_scrape_and_download():
     fieldnames = [
         "title","type","dates","location","application_deadline",
         "training_summary","training_description",
-        "participants_no","participants_from","recommended_for",
-        "accessibility","working_language","organiser",
+        "participants_no","participants_from","recommended_for","accessibility","working_language","organiser",
         "participation_fee","accommodation_food","travel_reimbursement",
         "infopack_downloads","application_procedure_url","application_form_link","detail_url"
     ]
