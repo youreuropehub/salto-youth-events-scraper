@@ -1,112 +1,178 @@
 <!DOCTYPE html>
 <html lang="it">
 <head>
-<meta charset="UTF-8">
-<title>SALTO Youth Scraper</title>
-<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-<style>
-body {
-    font-family: sans-serif;
-    background: #f0f0f0;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    height: 100vh;
-}
-.container {
-    background: #fff;
-    padding: 40px;
-    border-radius: 16px;
-    width: 700px;
-}
-input {
-    width: 120px;
-    padding: 8px;
-    text-align: center;
-    margin-right: 10px;
-}
-button {
-    padding: 10px 20px;
-    border-radius: 30px;
-    border: none;
-    background: #667eea;
-    color: #fff;
-    font-weight: 600;
-    cursor: pointer;
-    margin-right: 10px;
-}
-button:disabled {
-    background: #ccc;
-    cursor: not-allowed;
-}
-#log {
-    background: #111;
-    color: #0f0;
-    height: 300px;
-    overflow: auto;
-    padding: 10px;
-    margin-top: 15px;
-    font-family: monospace;
-}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SALTO Youth Scraper</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            padding: 40px;
+            max-width: 800px;
+            width: 100%;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+            text-align: center;
+        }
+        .subtitle {
+            color: #666;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        .button-group {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 30px;
+            justify-content: center;
+        }
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            font-size: 16px;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+        }
+        button:active {
+            transform: translateY(0);
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        #log {
+            background: #1e1e1e;
+            color: #00ff00;
+            padding: 20px;
+            border-radius: 10px;
+            height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.6;
+            box-shadow: inset 0 2px 10px rgba(0,0,0,0.5);
+        }
+        #log::-webkit-scrollbar {
+            width: 10px;
+        }
+        #log::-webkit-scrollbar-track {
+            background: #2d2d2d;
+            border-radius: 10px;
+        }
+        #log::-webkit-scrollbar-thumb {
+            background: #667eea;
+            border-radius: 10px;
+        }
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-left: 3px solid #667eea;
+            padding-left: 10px;
+        }
+        .status {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 1.2em;
+            color: #667eea;
+            font-weight: 600;
+        }
+    </style>
 </head>
 <body>
+    <div class="container">
+        <h1>🌍 SALTO Youth Scraper</h1>
+        <p class="subtitle">Estrai automaticamente le opportunità di formazione</p>
 
-<div class="container">
-<h2>SALTO Youth Scraper</h2>
+        <div class="button-group">
+            <button id="startBtn" onclick="startScraping()">
+                🚀 Avvia Scraping
+            </button>
+            <button id="downloadBtn" onclick="downloadCSV()" disabled>
+                📥 Scarica CSV
+            </button>
+        </div>
 
-<p>
-Pagine:
-<input id="pages" type="number" value="5" min="1">
-Eventi:
-<input id="events" type="number" value="50" min="1">
-</p>
+        <div id="log"></div>
+        <div class="status" id="status"></div>
+    </div>
 
-<button id="startBtn">Avvia scraping</button>
-<button id="dl" onclick="download()" disabled>Scarica CSV</button>
+    <script>
+        const socket = io();
+        const logDiv = document.getElementById('log');
+        const startBtn = document.getElementById('startBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const statusDiv = document.getElementById('status');
 
-<div id="log"></div>
-</div>
+        function addLog(message) {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
 
-<script>
-const socket = io();
-const log = document.getElementById("log");
-const dl = document.getElementById("dl");
-const startBtn = document.getElementById("startBtn");
+        function startScraping() {
+            logDiv.innerHTML = '';
+            startBtn.disabled = true;
+            downloadBtn.disabled = true;
+            statusDiv.textContent = '⏳ Scraping in corso...';
+            addLog('Connessione al server...');
+            socket.emit('start_scraping');
+        }
 
-function add(msg){
-    log.innerHTML += msg + "<br>";
-    log.scrollTop = log.scrollHeight;
-}
+        function downloadCSV() {
+            window.location.href = '/download_csv';
+            addLog('Download CSV avviato!');
+        }
 
-function start(){
-    log.innerHTML = "";
-    dl.disabled = true;
-    startBtn.disabled = true;
+        socket.on('log', function(data) {
+            addLog(data.message);
+        });
 
-    const max_pages = parseInt(document.getElementById("pages").value);
-    const max_events = parseInt(document.getElementById("events").value);
+        socket.on('scraping_done', function(data) {
+            startBtn.disabled = false;
+            downloadBtn.disabled = false;
+            statusDiv.textContent = `✅ Completato! ${data.count} eventi trovati`;
+            addLog(`Scraping completato! Totale: ${data.count} eventi`);
+        });
 
-    socket.emit("start_scraping", { max_pages, max_events });
-}
+        socket.on('connect', function() {
+            addLog('✓ Connesso al server');
+        });
 
-function download(){
-    window.location="/download_csv";
-}
-
-// Event listener per bottone
-startBtn.addEventListener("click", start);
-
-// SocketIO log
-socket.on("log", d => add(d.message));
-
-// Quando lo scraping è completato
-socket.on("scraping_done", d => {
-    add("Completato: " + d.count + " eventi");
-    dl.disabled = false;
-    startBtn.disabled = false;
-});
-</script>
-
+        socket.on('disconnect', function() {
+            addLog('✗ Disconnesso dal server');
+        });
+    </script>
 </body>
 </html>
