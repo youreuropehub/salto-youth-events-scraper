@@ -19,16 +19,12 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 BASE_URL = "https://www.salto-youth.net"
 
-# ================== CONFIG ==================
-DEFAULT_MAX_PAGES = 10
-DEFAULT_MAX_EVENTS = 100
+scraped_data = []
 OUTPUT_DIR = "output"
 
-scraped_data = []
+DEFAULT_MAX_PAGES = 50
+DEFAULT_MAX_EVENTS = 1000
 
-# ============================================================
-# ================== URL BUILDER =============================
-# ============================================================
 
 def build_search_url(offset: int) -> str:
     today = date.today()
@@ -45,14 +41,13 @@ def build_search_url(offset: int) -> str:
         f"&b_application_deadline_after_year={today.year}"
     )
 
-# ============================================================
-# ================== LIST PAGE PARSER =========================
-# ============================================================
+
+# ===================== PARSE LIST PAGE (ORIGINALE) =====================
 
 def parse_list_page(html):
     soup = BeautifulSoup(html, "html.parser")
-    events = []
     seen_urls = set()
+    events = []
 
     for h3 in soup.find_all("h3"):
         a = h3.find("a")
@@ -61,9 +56,7 @@ def parse_list_page(html):
 
         title = a.get_text(strip=True)
         url = a.get("href", "").strip()
-        if not url:
-            continue
-        if not url.startswith("http"):
+        if url and not url.startswith("http"):
             url = BASE_URL + url
 
         if url in seen_urls:
@@ -82,11 +75,11 @@ def parse_list_page(html):
         type_ = lines[idx - 1] if idx > 0 else ""
         dates = lines[idx + 1] if idx + 1 < len(lines) else ""
         location = lines[idx + 2] if idx + 2 < len(lines) else ""
-        application_deadline = ""
 
+        app_deadline = ""
         for l in lines:
             if "Application deadline" in l:
-                application_deadline = l.split(":", 1)[-1].strip()
+                app_deadline = l.split(":", 1)[-1].strip()
                 break
 
         events.append({
@@ -94,21 +87,65 @@ def parse_list_page(html):
             "type": type_,
             "dates": dates,
             "location": location,
-            "application_deadline": application_deadline,
-            "detail_url": url
+            "application_deadline": app_deadline,
+            "detail_url": url,
+        })
+
+    for link in soup.select("a[href*='/tools/european-training-calendar/training/']"):
+        title = link.get_text(strip=True)
+        if not title:
+            continue
+
+        detail_url = link.get("href", "").strip()
+        if detail_url and not detail_url.startswith("http"):
+            detail_url = BASE_URL + detail_url
+
+        if detail_url in seen_urls:
+            continue
+        seen_urls.add(detail_url)
+
+        container = link.find_parent()
+        for _ in range(4):
+            if container and container.name not in ["body", "html"]:
+                container = container.parent
+
+        text_block = container.get_text("\n", strip=True) if container else ""
+        lines = [l.strip() for l in text_block.split("\n") if l.strip()]
+
+        try:
+            idx = lines.index(title)
+        except ValueError:
+            idx = 0
+
+        type_ = lines[idx - 1] if idx > 0 else ""
+        dates = lines[idx + 1] if idx + 1 < len(lines) else ""
+        location = lines[idx + 2] if idx + 2 < len(lines) else ""
+
+        app_deadline = ""
+        for l in lines:
+            if "Application deadline" in l:
+                app_deadline = l.split(":", 1)[-1].strip()
+                break
+
+        events.append({
+            "title": title,
+            "type": type_,
+            "dates": dates,
+            "location": location,
+            "application_deadline": app_deadline,
+            "detail_url": detail_url,
         })
 
     return events
 
-# ============================================================
-# ================== DETAIL PAGE PARSER =======================
-# ============================================================
+
+# ===================== PARSE DETAIL PAGE (ORIGINALE) =====================
 
 def parse_detail_page(html):
     soup = BeautifulSoup(html, "html.parser")
 
-    def section(title):
-        h = soup.find(lambda t: t.name in ["h3", "h4"] and title in t.get_text())
+    def section_after_heading(text):
+        h = soup.find(lambda t: t.name in ["h3", "h4"] and text in t.get_text())
         if not h:
             return ""
         parts = []
@@ -118,89 +155,26 @@ def parse_detail_page(html):
             parts.append(sib.get_text(" ", strip=True))
         return " ".join(parts).strip()
 
-    # Training overview
-    training_overview = section("Training overview")
-    lines = [l.strip() for l in training_overview.splitlines() if l.strip()]
-
-    participants_no = ""
-    participants_from = ""
-    recommended_for = ""
-    working_language = ""
-    organiser = ""
-
-    i = 0
-    while i < len(lines):
-        low = lines[i].lower()
-
-        if low == "for" and i + 1 < len(lines):
-            if "participants" in lines[i + 1].lower():
-                participants_no = lines[i + 1].replace("participants", "").strip()
-                j = i + 2
-                countries = []
-                while j < len(lines):
-                    if lines[j].lower().startswith("and recommended"):
-                        break
-                    countries.append(lines[j])
-                    j += 1
-                participants_from = " ".join(countries)
-                i = j
-                continue
-
-        if "recommended for" in low and i + 1 < len(lines):
-            recommended_for = lines[i + 1]
-
-        if "working language" in low:
-            working_language = lines[i].split(":", 1)[-1].strip()
-
-        if low.startswith("organiser"):
-            organiser = lines[i].split(":", 1)[-1].strip()
-
-        i += 1
-
-    # Downloads
-    infopack_downloads = ""
-    for tag in soup.find_all(string=re.compile("Available downloads")):
-        parent = tag.parent
-        link = parent.find_next("a", href=True)
-        if link:
-            infopack_downloads = link["href"]
-            if not infopack_downloads.startswith("http"):
-                infopack_downloads = BASE_URL + infopack_downloads
-            break
-
-    # Application procedure
-    application_procedure_url = ""
-    for a in soup.find_all("a", href=True):
-        if "/application-procedure/" in a["href"]:
-            application_procedure_url = a["href"]
-            if not application_procedure_url.startswith("http"):
-                application_procedure_url = BASE_URL + application_procedure_url
-            break
-
     return {
-        "participants_no": participants_no,
-        "participants_from": participants_from,
-        "recommended_for": recommended_for,
-        "accessibility": section("Accessibility"),
-        "working_language": working_language,
-        "organiser": organiser,
-        "participation_fee": section("Participation fee"),
-        "accommodation_food": section("Accommodation and food"),
-        "travel_reimbursement": section("Travel reimbursement"),
-        "infopack_downloads": infopack_downloads,
-        "application_procedure_url": application_procedure_url
+        "participants_no": "",
+        "participants_from": "",
+        "recommended_for": "",
+        "accessibility": section_after_heading("Accessibility"),
+        "working_language": "",
+        "organiser": "",
+        "participation_fee": section_after_heading("Participation fee"),
+        "accommodation_food": section_after_heading("Accommodation and food"),
+        "travel_reimbursement": section_after_heading("Travel reimbursement"),
+        "infopack_downloads": "",
+        "application_procedure_url": "",
     }
 
-# ============================================================
-# ================== EXTERNAL FORM LINK =======================
-# ============================================================
 
 def get_external_application_link(url):
     if not url:
         return ""
     try:
-        resp = requests.get(url, timeout=10)
-        soup = BeautifulSoup(resp.text, "html.parser")
+        soup = BeautifulSoup(requests.get(url, timeout=10).text, "html.parser")
         for a in soup.find_all("a", href=True):
             if any(x in a["href"] for x in [
                 "forms.gle", "google.com/forms",
@@ -211,30 +185,34 @@ def get_external_application_link(url):
         pass
     return ""
 
-# ============================================================
-# ================== CSV SAVE ================================
-# ============================================================
 
-def save_csv():
+def save_csv_to_file():
     if not scraped_data:
         return
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     path = os.path.join(OUTPUT_DIR, "salto_events_complete.csv")
 
-    fieldnames = scraped_data[0].keys()
+    fieldnames = [
+        "title", "type", "dates", "location", "application_deadline",
+        "participants_no", "participants_from", "recommended_for",
+        "accessibility", "working_language", "organiser",
+        "participation_fee", "accommodation_food", "travel_reimbursement",
+        "infopack_downloads", "application_procedure_url",
+        "application_form_link", "detail_url"
+    ]
+
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(scraped_data)
 
-    socketio.emit("log", {"message": f"CSV salvato: {path}"})
+    socketio.emit("log", {"message": f"CSV salvato in {path}"})
 
-# ============================================================
-# ================== SCRAPER CORE =============================
-# ============================================================
 
-def scrape_events(max_pages, max_events):
+# ===================== SCRAPER CORE =====================
+
+def scrape_events(max_pages=DEFAULT_MAX_PAGES, max_events=DEFAULT_MAX_EVENTS):
     global scraped_data
     scraped_data = []
 
@@ -247,6 +225,7 @@ def scrape_events(max_pages, max_events):
     while page < max_pages:
         offset = page * page_size
         socketio.emit("log", {"message": f"Pagina {page + 1} (offset {offset})"})
+
         resp = session.get(build_search_url(offset), timeout=15)
         resp.raise_for_status()
 
@@ -254,9 +233,10 @@ def scrape_events(max_pages, max_events):
         if not events:
             break
 
-        for ev in events:
-            if ev["detail_url"] not in events_dict:
-                events_dict[ev["detail_url"]] = ev
+        for event in events:
+            url = event["detail_url"]
+            if url not in events_dict:
+                events_dict[url] = event
                 if len(events_dict) >= max_events:
                     break
 
@@ -268,34 +248,38 @@ def scrape_events(max_pages, max_events):
 
     scraped_data = list(events_dict.values())
 
-    for i, ev in enumerate(scraped_data, start=1):
-        socketio.emit("log", {"message": f"[{i}/{len(scraped_data)}] {ev['title']}"})
-        resp = session.get(ev["detail_url"], timeout=15)
+    for i, event in enumerate(scraped_data, start=1):
+        socketio.emit("log", {"message": f"[{i}/{len(scraped_data)}] {event['title']}"})
+
+        resp = session.get(event["detail_url"], timeout=15)
         resp.raise_for_status()
 
         detail = parse_detail_page(resp.text)
-        ev.update(detail)
-        ev["application_form_link"] = get_external_application_link(
-            ev.get("application_procedure_url")
+        event.update(detail)
+        event["application_form_link"] = get_external_application_link(
+            event.get("application_procedure_url")
         )
+
         time.sleep(1)
 
-    save_csv()
+    save_csv_to_file()
     socketio.emit("scraping_done", {"count": len(scraped_data)})
 
-# ============================================================
-# ================== ROUTES ==================================
-# ============================================================
+
+# ===================== ROUTES =====================
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
+
 @socketio.on("start_scraping")
-def start_scraping(data):
-    max_pages = int(data.get("max_pages", DEFAULT_MAX_PAGES))
-    max_events = int(data.get("max_events", DEFAULT_MAX_EVENTS))
-    scrape_events(max_pages, max_events)
+def handle_start_scraping(data):
+    scrape_events(
+        int(data.get("max_pages", DEFAULT_MAX_PAGES)),
+        int(data.get("max_events", DEFAULT_MAX_EVENTS))
+    )
+
 
 @app.route("/download_csv")
 def download_csv():
@@ -313,14 +297,15 @@ def download_csv():
                      download_name="salto_events_complete.csv",
                      mimetype="text/csv")
 
+
 @app.route("/api/scrape", methods=["GET", "POST"])
 def api_scrape():
-    max_pages = int(request.values.get("max_pages", DEFAULT_MAX_PAGES))
-    max_events = int(request.values.get("max_events", DEFAULT_MAX_EVENTS))
-    scrape_events(max_pages, max_events)
+    scrape_events(
+        int(request.values.get("max_pages", DEFAULT_MAX_PAGES)),
+        int(request.values.get("max_events", DEFAULT_MAX_EVENTS))
+    )
     return jsonify({"status": "ok", "count": len(scraped_data)})
 
-# ============================================================
 
 if __name__ == "__main__":
     socketio.run(app, host="0.0.0.0", port=5000, debug=True)
