@@ -151,6 +151,10 @@ def parse_detail_page(html, detail_url):
             parts.append(sib.get_text("\n", strip=True))
         training_overview = "\n".join(parts).strip()
 
+    # Nuovi campi
+    training_description = training_overview
+    training_summary = training_overview.split("\n")[0] if training_overview else ""
+
     participants_no = ""
     participants_from = ""
     recommended_for = ""
@@ -278,6 +282,8 @@ def parse_detail_page(html, detail_url):
         "travel_reimbursement": travel_reimbursement,
         "infopack_downloads": infopack_downloads,
         "application_procedure_url": application_procedure_url,
+        "training_summary": training_summary,
+        "training_description": training_description,
     }
 
 
@@ -306,7 +312,8 @@ def save_csv_to_file():
         "participants_no","participants_from","recommended_for","accessibility",
         "working_language","organiser","participation_fee","accommodation_food",
         "travel_reimbursement","infopack_downloads","application_procedure_url",
-        "application_form_link","detail_url"
+        "application_form_link","detail_url",
+        "training_summary","training_description"
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
