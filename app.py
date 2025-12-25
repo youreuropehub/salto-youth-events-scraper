@@ -18,7 +18,6 @@ app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 BASE_URL = "https://www.salto-youth.net"
-
 scraped_data = []
 OUTPUT_DIR = "output"
 
@@ -48,7 +47,6 @@ def parse_list_page(html):
     seen_urls = set()
     events = []
 
-    # Metodo 1: h3 + link
     for h3 in soup.find_all("h3"):
         a = h3.find("a")
         if not a:
@@ -89,7 +87,6 @@ def parse_list_page(html):
             "detail_url": url,
         })
 
-    # Metodo 2: tutti i link diretti
     for link in soup.select("a[href*='/tools/european-training-calendar/training/']"):
         title = link.get_text(strip=True)
         if not title:
@@ -136,24 +133,16 @@ def parse_list_page(html):
     return events
 
 
-# ===================== PARSE DETAIL PAGE COMPLETO =====================
+# ===================== PARSE DETAIL PAGE =====================
 def parse_detail_page(html, detail_url):
     soup = BeautifulSoup(html, "html.parser")
 
-    # ---------- Training overview ----------
-    training_overview = ""
-    h3_overview = soup.find(lambda t: t.name in ["h3", "h4"] and "Training overview" in t.get_text())
-    if h3_overview:
-        parts = []
-        for sib in h3_overview.find_next_siblings():
-            if sib.name and sib.name.startswith("h"):
-                break
-            parts.append(sib.get_text("\n", strip=True))
-        training_overview = "\n".join(parts).strip()
+    # ---------- Training summary e description dai div specifici ----------
+    summary_div = soup.find("div", class_=re.compile(r"training-summary"))
+    training_summary = summary_div.get_text("\n", strip=True) if summary_div else ""
 
-    # Nuovi campi
-    training_description = training_overview
-    training_summary = training_overview.split("\n")[0] if training_overview else ""
+    description_div = soup.find("div", class_=re.compile(r"training-description"))
+    training_description = description_div.get_text("\n", strip=True) if description_div else ""
 
     participants_no = ""
     participants_from = ""
@@ -161,6 +150,8 @@ def parse_detail_page(html, detail_url):
     working_lang = ""
     organiser = ""
 
+    # ---------- Estrazione dettagli dal training overview ----------
+    training_overview = training_description
     lines = [l.strip() for l in training_overview.splitlines() if l.strip()]
     i = 0
     while i < len(lines):
