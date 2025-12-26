@@ -1,275 +1,175 @@
-# IMPORTANTE: monkey patching di gevent PRIMA di qualsiasi altro import
+# ===================== MONKEY PATCH =====================
 from gevent import monkey
 monkey.patch_all()
 
+# ===================== IMPORT =====================
 import os
 import time
 import csv
 import re
+import json
 from io import StringIO, BytesIO
 from datetime import date
 from flask import Flask, render_template, jsonify, send_file, request
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO
 from bs4 import BeautifulSoup
 import requests
 
+# Google Sheets
+import gspread
+from google.oauth2.service_account import Credentials
+
+# ===================== APP =====================
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 BASE_URL = "https://www.salto-youth.net"
-scraped_data = []
 OUTPUT_DIR = "output"
 
 DEFAULT_MAX_PAGES = 50
 DEFAULT_MAX_EVENTS = 1000
 
+GOOGLE_SHEET_NAME = "SALTO-EVENTS"
+GOOGLE_TAB_NAME = "SALTO-EVENTS"
+DEDUP_KEY = "detail_url"
 
-def build_search_url(offset: int) -> str:
+scraped_data = []
+
+# ===================== GOOGLE SHEETS =====================
+def get_gsheet():
+    creds_json = os.environ.get("GOOGLE_CREDS_JSON")
+    if not creds_json:
+        raise RuntimeError("GOOGLE_CREDS_JSON not set")
+
+    creds_dict = json.loads(creds_json)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    client = gspread.authorize(creds)
+
+    sheet = client.open(GOOGLE_SHEET_NAME)
+    try:
+        worksheet = sheet.worksheet(GOOGLE_TAB_NAME)
+    except gspread.WorksheetNotFound:
+        worksheet = sheet.add_worksheet(title=GOOGLE_TAB_NAME, rows=1000, cols=50)
+
+    return worksheet
+
+def export_to_google_sheet(rows):
+    if not rows:
+        return
+
+    ws = get_gsheet()
+    existing = ws.get_all_records()
+    existing_keys = {r.get(DEDUP_KEY) for r in existing if r.get(DEDUP_KEY)}
+
+    new_rows = [r for r in rows if r.get(DEDUP_KEY) not in existing_keys]
+
+    if not existing:
+        ws.append_row(list(rows[0].keys()))
+
+    if new_rows:
+        ws.append_rows([list(r.values()) for r in new_rows])
+        socketio.emit("log", {"message": f"Google Sheet: aggiunti {len(new_rows)} nuovi eventi"})
+    else:
+        socketio.emit("log", {"message": "Google Sheet: nessun nuovo evento"})
+
+# ===================== URL BUILDER =====================
+def build_search_url(offset):
     today = date.today()
     return (
         "https://www.salto-youth.net/tools/european-training-calendar/browse/"
         f"?b_offset={offset}&b_limit=10"
         "&b_order=applicationDeadline"
-        "&b_keyword="
         f"&b_begin_date_after_day={today.day}"
         f"&b_begin_date_after_month={today.month}"
         f"&b_begin_date_after_year={today.year}"
-        f"&b_application_deadline_after_day={today.day}"
-        f"&b_application_deadline_after_month={today.month}"
-        f"&b_application_deadline_after_year={today.year}"
     )
 
-
-# ===================== PARSE LIST PAGE =====================
+# ===================== PARSING =====================
 def parse_list_page(html):
     soup = BeautifulSoup(html, "html.parser")
-    seen_urls = set()
     events = []
-
     for h3 in soup.find_all("h3"):
         a = h3.find("a")
         if not a:
             continue
         title = a.get_text(strip=True)
-        url = a.get("href", "").strip()
-        if url and not url.startswith("http"):
+        url = a.get("href")
+        if not url.startswith("http"):
             url = BASE_URL + url
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
-
-        block = h3.parent
-        text = block.get_text("\n", strip=True)
-        lines = [l for l in text.split("\n") if l.strip()]
-
-        try:
-            idx = lines.index(title)
-        except ValueError:
-            idx = 0
-
-        type_ = lines[idx - 1] if idx > 0 else ""
-        dates = lines[idx + 1] if idx + 1 < len(lines) else ""
-        location = lines[idx + 2] if idx + 2 < len(lines) else ""
-
-        app_deadline = ""
-        for l in lines:
-            if "Application deadline" in l:
-                app_deadline = l.split(":", 1)[-1].strip()
-                break
-
         events.append({
             "title": title,
-            "type": type_,
-            "dates": dates,
-            "location": location,
-            "application_deadline": app_deadline,
-            "detail_url": url,
+            "detail_url": url
         })
-
-    for link in soup.select("a[href*='/tools/european-training-calendar/training/']"):
-        title = link.get_text(strip=True)
-        if not title:
-            continue
-        detail_url = link.get("href", "").strip()
-        if detail_url and not detail_url.startswith("http"):
-            detail_url = BASE_URL + detail_url
-        if detail_url in seen_urls:
-            continue
-        seen_urls.add(detail_url)
-
-        container = link.find_parent()
-        for _ in range(4):
-            if container and container.name not in ["body", "html"]:
-                container = container.parent
-        text_block = container.get_text("\n", strip=True) if container else ""
-        lines = [l.strip() for l in text_block.split("\n") if l.strip()]
-
-        try:
-            idx = lines.index(title)
-        except ValueError:
-            idx = 0
-
-        type_ = lines[idx - 1] if idx > 0 else ""
-        dates = lines[idx + 1] if idx + 1 < len(lines) else ""
-        location = lines[idx + 2] if idx + 2 < len(lines) else ""
-
-        app_deadline = ""
-        for i, l in enumerate(lines):
-            if "Application deadline" in l:
-                if i + 1 < len(lines):
-                    app_deadline = lines[i + 1]
-                break
-
-        events.append({
-            "title": title,
-            "type": type_,
-            "dates": dates,
-            "location": location,
-            "application_deadline": app_deadline,
-            "detail_url": detail_url,
-        })
-
     return events
 
-
-# ===================== PARSE DETAIL PAGE =====================
-def parse_detail_page(html, detail_url):
+def parse_detail_page(html):
     soup = BeautifulSoup(html, "html.parser")
-
-    summary_div = soup.find("div", class_=re.compile(r"training-summary"))
-    training_summary = summary_div.get_text("\n", strip=True) if summary_div else ""
-
-    description_div = soup.find("div", class_=re.compile(r"training-description"))
-    training_description = description_div.get_text("\n", strip=True) if description_div else ""
-
     return {
-        "training_summary": training_summary,
-        "training_description": training_description,
+        "training_summary": soup.get_text(" ", strip=True)[:500]
     }
 
-
-def save_csv_to_file():
-    if not scraped_data:
-        return
+# ===================== CSV =====================
+def save_csv(rows):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     path = os.path.join(OUTPUT_DIR, "salto_events_complete.csv")
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=scraped_data[0].keys())
+        writer = csv.DictWriter(f, fieldnames=rows[0].keys())
         writer.writeheader()
-        writer.writerows(scraped_data)
-    socketio.emit("log", {"message": f"CSV salvato in {path}"})
-
+        writer.writerows(rows)
+    return path
 
 # ===================== SCRAPER =====================
-def scrape_events(max_pages=DEFAULT_MAX_PAGES, max_events=DEFAULT_MAX_EVENTS):
+def scrape_events(max_pages, max_events):
     global scraped_data
     scraped_data = []
 
     session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0"})
-    events_dict = {}
+    seen = set()
 
-    page = 0
-    page_size = 10
-
-    while page < max_pages:
-        offset = page * page_size
-        socketio.emit("log", {"message": f"Pagina {page + 1} (offset {offset})"})
-
+    for page in range(max_pages):
+        offset = page * 10
         resp = session.get(build_search_url(offset), timeout=15)
         events = parse_list_page(resp.text)
         if not events:
             break
 
-        for event in events:
-            url = event["detail_url"]
-            if url not in events_dict:
-                events_dict[url] = event
-                if len(events_dict) >= max_events:
-                    break
+        for ev in events:
+            if ev["detail_url"] in seen:
+                continue
+            seen.add(ev["detail_url"])
 
-        if len(events_dict) >= max_events:
+            detail = session.get(ev["detail_url"], timeout=15)
+            ev.update(parse_detail_page(detail.text))
+            scraped_data.append(ev)
+
+            socketio.emit("log", {"message": ev["title"]})
+            if len(scraped_data) >= max_events:
+                break
+            time.sleep(1)
+
+        if len(scraped_data) >= max_events:
             break
 
-        page += 1
-        time.sleep(1)
-
-    scraped_data = list(events_dict.values())
-
-    for i, event in enumerate(scraped_data, start=1):
-        socketio.emit("log", {"message": f"[{i}/{len(scraped_data)}] {event['title']}"})
-        resp = session.get(event["detail_url"], timeout=15)
-        detail = parse_detail_page(resp.text, event["detail_url"])
-        event.update(detail)
-        time.sleep(1)
-
-    save_csv_to_file()
-    socketio.emit("scraping_done", {"count": len(scraped_data)})
-
+    save_csv(scraped_data)
+    export_to_google_sheet(scraped_data)
 
 # ===================== ROUTES =====================
 @app.route("/")
 def index():
     return render_template("index.html")
 
-
-@app.route("/api/scrape", methods=["GET", "POST"])
+@app.route("/api/scrape", methods=["POST", "GET"])
 def api_scrape():
-    scrape_events(
-        int(request.values.get("max_pages", DEFAULT_MAX_PAGES)),
-        int(request.values.get("max_events", DEFAULT_MAX_EVENTS))
-    )
+    scrape_events(DEFAULT_MAX_PAGES, DEFAULT_MAX_EVENTS)
     return jsonify({"status": "ok", "count": len(scraped_data)})
-
 
 @app.route("/download_csv")
 def download_csv():
-    if not scraped_data:
-        return "Nessun dato", 400
+    path = os.path.join(OUTPUT_DIR, "salto_events_complete.csv")
+    return send_file(path, as_attachment=True)
 
-    buffer = StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=scraped_data[0].keys())
-    writer.writeheader()
-    writer.writerows(scraped_data)
-
-    mem = BytesIO(buffer.getvalue().encode("utf-8"))
-    mem.seek(0)
-
-    return send_file(
-        mem,
-        as_attachment=True,
-        download_name="salto_events_complete.csv",
-        mimetype="text/csv"
-    )
-
-
-# ===================== SCRAPE + DOWNLOAD (UNA SOLA CHIAMATA) =====================
-@app.route("/scrape_and_download", methods=["GET", "POST"])
-def scrape_and_download():
-    scrape_events(
-        int(request.values.get("max_pages", DEFAULT_MAX_PAGES)),
-        int(request.values.get("max_events", DEFAULT_MAX_EVENTS))
-    )
-
-    if not scraped_data:
-        return "Nessun dato", 400
-
-    buffer = StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=scraped_data[0].keys())
-    writer.writeheader()
-    writer.writerows(scraped_data)
-
-    mem = BytesIO(buffer.getvalue().encode("utf-8"))
-    mem.seek(0)
-
-    return send_file(
-        mem,
-        as_attachment=True,
-        download_name="salto_events_complete.csv",
-        mimetype="text/csv"
-    )
-
-
+# ===================== MAIN =====================
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    socketio.run(app, host="0.0.0.0", port=5000)
