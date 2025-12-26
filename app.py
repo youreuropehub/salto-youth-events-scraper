@@ -40,7 +40,11 @@ def get_gsheet():
 
     creds_dict = json.loads(creds_json)
 
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    scopes = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
 
     client = gspread.authorize(creds)
