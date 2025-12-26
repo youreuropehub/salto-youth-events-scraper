@@ -5,3 +5,7 @@ gevent-websocket==0.10.1
 requests==2.32.3
 beautifulsoup4==4.12.3
 gunicorn==22.0.0
+gspread
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
