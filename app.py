@@ -87,6 +87,49 @@ def parse_list_page(html):
             "detail_url": url,
         })
 
+    for link in soup.select("a[href*='/tools/european-training-calendar/training/']"):
+        title = link.get_text(strip=True)
+        if not title:
+            continue
+        detail_url = link.get("href", "").strip()
+        if detail_url and not detail_url.startswith("http"):
+            detail_url = BASE_URL + detail_url
+        if detail_url in seen_urls:
+            continue
+        seen_urls.add(detail_url)
+
+        container = link.find_parent()
+        for _ in range(4):
+            if container and container.name not in ["body", "html"]:
+                container = container.parent
+        text_block = container.get_text("\n", strip=True) if container else ""
+        lines = [l.strip() for l in text_block.split("\n") if l.strip()]
+
+        try:
+            idx = lines.index(title)
+        except ValueError:
+            idx = 0
+
+        type_ = lines[idx - 1] if idx > 0 else ""
+        dates = lines[idx + 1] if idx + 1 < len(lines) else ""
+        location = lines[idx + 2] if idx + 2 < len(lines) else ""
+
+        app_deadline = ""
+        for i, l in enumerate(lines):
+            if "Application deadline" in l:
+                if i + 1 < len(lines):
+                    app_deadline = lines[i + 1]
+                break
+
+        events.append({
+            "title": title,
+            "type": type_,
+            "dates": dates,
+            "location": location,
+            "application_deadline": app_deadline,
+            "detail_url": detail_url,
+        })
+
     return events
 
 
@@ -106,21 +149,6 @@ def parse_detail_page(html, detail_url):
     }
 
 
-def get_external_application_link(url):
-    if not url:
-        return ""
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for a in soup.find_all("a", href=True):
-            if any(d in a["href"] for d in ["forms.gle","google.com/forms","typeform.com","jotform.com"]):
-                return a["href"]
-    except Exception:
-        return ""
-    return ""
-
-
 def save_csv_to_file():
     if not scraped_data:
         return
@@ -130,6 +158,7 @@ def save_csv_to_file():
         writer = csv.DictWriter(f, fieldnames=scraped_data[0].keys())
         writer.writeheader()
         writer.writerows(scraped_data)
+    socketio.emit("log", {"message": f"CSV salvato in {path}"})
 
 
 # ===================== SCRAPER =====================
@@ -138,7 +167,7 @@ def scrape_events(max_pages=DEFAULT_MAX_PAGES, max_events=DEFAULT_MAX_EVENTS):
     scraped_data = []
 
     session = requests.Session()
-    session.headers.update({"User-Agent":"Mozilla/5.0"})
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
     events_dict = {}
 
     page = 0
@@ -146,8 +175,12 @@ def scrape_events(max_pages=DEFAULT_MAX_PAGES, max_events=DEFAULT_MAX_EVENTS):
 
     while page < max_pages:
         offset = page * page_size
+        socketio.emit("log", {"message": f"Pagina {page + 1} (offset {offset})"})
+
         resp = session.get(build_search_url(offset), timeout=15)
         events = parse_list_page(resp.text)
+        if not events:
+            break
 
         for event in events:
             url = event["detail_url"]
@@ -158,23 +191,27 @@ def scrape_events(max_pages=DEFAULT_MAX_PAGES, max_events=DEFAULT_MAX_EVENTS):
 
         if len(events_dict) >= max_events:
             break
+
         page += 1
         time.sleep(1)
 
     scraped_data = list(events_dict.values())
 
-    for event in scraped_data:
+    for i, event in enumerate(scraped_data, start=1):
+        socketio.emit("log", {"message": f"[{i}/{len(scraped_data)}] {event['title']}"})
         resp = session.get(event["detail_url"], timeout=15)
         detail = parse_detail_page(resp.text, event["detail_url"])
         event.update(detail)
+        time.sleep(1)
 
     save_csv_to_file()
+    socketio.emit("scraping_done", {"count": len(scraped_data)})
 
 
 # ===================== ROUTES =====================
 @app.route("/")
 def index():
-    return "OK"
+    return render_template("index.html")
 
 
 @app.route("/api/scrape", methods=["GET", "POST"])
@@ -198,6 +235,7 @@ def download_csv():
 
     mem = BytesIO(buffer.getvalue().encode("utf-8"))
     mem.seek(0)
+
     return send_file(
         mem,
         as_attachment=True,
@@ -206,7 +244,7 @@ def download_csv():
     )
 
 
-# ===================== NUOVO ENDPOINT: SCRAPE + DOWNLOAD =====================
+# ===================== SCRAPE + DOWNLOAD (UNA SOLA CHIAMATA) =====================
 @app.route("/scrape_and_download", methods=["GET", "POST"])
 def scrape_and_download():
     scrape_events(
