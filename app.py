@@ -1,19 +1,17 @@
 import os
-import json
-import time
 import requests
+import gspread
 from flask import Flask, Response
 from bs4 import BeautifulSoup
-import gspread
-from google.oauth2.service_account import Credentials
+from oauth2client.service_account import ServiceAccountCredentials
+from urllib.parse import urljoin
+from datetime import datetime
+import time
 
-# ================= CONFIG =================
+# ===================== CONFIG =====================
 
 BASE_URL = "https://www.salto-youth.net"
 BROWSE_URL = "https://www.salto-youth.net/tools/european-training-calendar/browse/"
-
-SPREADSHEET_NAME = "SALTO-EVENTS"
-WORKSHEET_NAME = "SALTO-EVENTS"
 
 HEADERS = [
     "title",
@@ -27,176 +25,197 @@ HEADERS = [
     "accessibility",
     "working_language",
     "organiser",
-    "posted_to_instagram"
+    "posted_to_instagram",
 ]
 
 SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
 ]
 
-# ================= GOOGLE SHEET =================
+SHEET_NAME = os.environ.get("GSHEET_NAME")
+CREDS_JSON = "credentials.json"
 
-def get_gsheet():
-    creds = json.loads(os.environ["GOOGLE_CREDS_JSON"])
-    credentials = Credentials.from_service_account_info(creds, scopes=SCOPES)
-    client = gspread.authorize(credentials)
+# ===================== GOOGLE SHEET =====================
 
-    sheet = client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
-
-    values = sheet.get_all_values()
-    if not values:
-        sheet.append_row(HEADERS)
-
-    return sheet
-
-
-def get_existing_urls(sheet):
-    records = sheet.get_all_records()
-    return {r["detail_url"] for r in records if r.get("detail_url")}
-
-
-# ================= SCRAPING =================
-
-def scrape_list(offset):
-    r = requests.get(
-        BROWSE_URL,
-        params={"b_offset": offset, "b_limit": 10},
-        timeout=30
+def get_sheet():
+    creds = ServiceAccountCredentials.from_json_keyfile_name(
+        CREDS_JSON, SCOPES
     )
-    r.raise_for_status()
-    return r.text
+    client = gspread.authorize(creds)
+    return client.open(SHEET_NAME).sheet1
 
 
-def parse_list(html):
-    soup = BeautifulSoup(html, "html.parser")
-    events = []
-
-    for item in soup.select(".tool-item"):
-        a = item.select_one("h2 a")
-        if not a:
-            continue
-
-        url = a["href"]
-        if not url.startswith("http"):
-            url = BASE_URL + url
-
-        events.append({
-            "title": a.get_text(strip=True),
-            "detail_url": url
-        })
-
-    return events
+def prepare_sheet(sheet):
+    sheet.clear()
+    sheet.insert_row(HEADERS, 1)
 
 
-def parse_detail(html):
-    soup = BeautifulSoup(html, "html.parser")
-
-    data = {h: "" for h in HEADERS}
-    data["posted_to_instagram"] = "FALSE"
-
-    cat = soup.select_one("span.h3.tool-item-category")
-    if cat:
-        data["type"] = cat.get_text(strip=True)
-
-    d = soup.select_one("ul.downloads-list a")
-    if d:
-        data["infopack_downloads"] = BASE_URL + d["href"] if d["href"].startswith("/") else d["href"]
-
-    for a in soup.select('a[href*="/application-procedure/"]'):
-        data["application_procedure_url"] = BASE_URL + a["href"] if a["href"].startswith("/") else a["href"]
-        break
-
-    h = soup.find("h3", string="Training overview")
-    if h:
-        for p in h.find_next_siblings("p"):
-            t = p.get_text(" ", strip=True)
-            if p.find("span", string="for"):
-                data["participants_no"] = t.replace("participants", "").strip()
-            elif p.find("span", string="from"):
-                data["participants_from"] = t.replace("from", "").strip()
-            elif "recommended for" in t.lower():
-                n = p.find_next_sibling("p")
-                if n:
-                    data["recommended_for"] = n.get_text(" ", strip=True)
-
-    h = soup.find("h3", string="Accessibility")
-    if h:
-        txt = []
-        for s in h.find_next_siblings():
-            if s.name and s.name.startswith("h"):
-                break
-            txt.append(s.get_text(" ", strip=True))
-        data["accessibility"] = " ".join(txt)
-
-    for p in soup.select(".microcopy"):
-        if "language" in p.get_text().lower():
-            data["working_language"] = p.get_text(strip=True)
-
-    for p in soup.find_all("p"):
-        if p.get_text(strip=True).lower().startswith("organiser"):
-            data["organiser"] = p.get_text().split(":", 1)[-1].strip()
-
-    return data
+def append_event(sheet, event):
+    row = [event.get(h, "") for h in HEADERS]
+    sheet.append_row(row, value_input_option="RAW")
 
 
-# ================= FLASK =================
+# ===================== SCRAPER =====================
+
+def scrape_events(log):
+
+    sheet = get_sheet()
+    prepare_sheet(sheet)
+
+    log("🧹 Foglio pulito e header creato")
+    log("🚀 Scraping avviato")
+
+    page = 1
+    offset = 0
+
+    while True:
+        log(f"\n📄 Pagina {page}")
+
+        params = {
+            "b_offset": offset,
+            "b_limit": 10,
+        }
+
+        r = requests.get(BROWSE_URL, params=params, timeout=30)
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        items = soup.select(".tool-item")
+        if not items:
+            log("✅ Nessun altro evento trovato")
+            break
+
+        for item in items:
+            title_el = item.select_one("h2 a")
+            if not title_el:
+                continue
+
+            title = title_el.get_text(strip=True)
+            detail_url = urljoin(BASE_URL, title_el["href"])
+
+            log(f"🔍 {title}")
+
+            event = scrape_detail(detail_url)
+            append_event(sheet, event)
+
+            log("   ➕ salvato")
+
+            time.sleep(0.5)
+
+        offset += 10
+        page += 1
+
+    log("\n🏁 Scraping completato")
+
+
+def scrape_detail(url):
+    r = requests.get(url, timeout=30)
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    def text(selector):
+        el = soup.select_one(selector)
+        return el.get_text(strip=True) if el else ""
+
+    def join_text(selector):
+        return " ".join(
+            el.get_text(strip=True)
+            for el in soup.select(selector)
+        )
+
+    event = {
+        "title": text("h1"),
+        "detail_url": url,
+        "type": text(".tool-item-category"),
+        "infopack_downloads": "",
+        "application_procedure_url": "",
+        "participants_no": "",
+        "participants_from": "",
+        "recommended_for": "",
+        "accessibility": "",
+        "working_language": "",
+        "organiser": "",
+        "posted_to_instagram": "FALSE",
+    }
+
+    # infopack
+    dl = soup.select_one(".downloads-list a")
+    if dl:
+        event["infopack_downloads"] = urljoin(BASE_URL, dl["href"])
+
+    # application procedure
+    app_link = soup.find("a", href=lambda x: x and "application-procedure" in x)
+    if app_link:
+        event["application_procedure_url"] = urljoin(BASE_URL, app_link["href"])
+
+    # overview
+    overview = soup.find("h3", string="Training overview")
+    if overview:
+        block = overview.find_next("div")
+
+        ps = block.find_all("p")
+        for p in ps:
+            label = p.find("span")
+            if not label:
+                continue
+
+            key = label.get_text(strip=True).lower()
+
+            value = p.get_text(strip=True).replace(label.get_text(strip=True), "").strip()
+
+            if "for" in key:
+                event["participants_no"] = value
+            elif "from" in key:
+                event["participants_from"] = value
+            elif "recommended" in key:
+                event["recommended_for"] = value
+            elif "accessible" in key:
+                event["accessibility"] = value
+            elif "language" in key:
+                event["working_language"] = value
+
+    # organiser
+    organiser = soup.select_one(".training-organiser")
+    if organiser:
+        event["organiser"] = organiser.get_text(strip=True)
+
+    return event
+
+
+# ===================== FLASK =====================
 
 app = Flask(__name__)
 
 @app.route("/")
-def index():
-    return '<a href="/api/scrape">▶ Avvia scraping</a>'
+def home():
+    return "SALTO scraper online"
 
 
 @app.route("/api/scrape")
-def scrape():
+def api_scrape():
 
     def stream():
-        yield "🚀 Scraping avviato\n\n"
+        def log(msg):
+            yield msg + "\n"
 
-        sheet = get_gsheet()
-        existing_urls = get_existing_urls(sheet)
-
-        offset = 0
-        page = 1
-        added = 0
-
-        while True:
-            yield f"📄 Pagina {page}\n"
-            events = parse_list(scrape_list(offset))
-
-            if not events:
-                break
-
-            for ev in events:
-                yield f"🔍 {ev['title']}\n"
-
-                if ev["detail_url"] in existing_urls:
-                    yield "🔁 GIÀ ESISTENTE\n\n"
-                    continue
-
-                r = requests.get(ev["detail_url"], timeout=30)
-                ev.update(parse_detail(r.text))
-
-                row = [ev[h] for h in HEADERS]
-                sheet.append_row(row)
-
-                existing_urls.add(ev["detail_url"])
-                added += 1
-                yield "➕ AGGIUNTO\n\n"
-
-            offset += 10
-            page += 1
-            time.sleep(1)
-
-        yield f"\n✅ Nuovi eventi aggiunti: {added}\n"
+        for line in scrape_generator(log):
+            yield line
 
     return Response(stream(), mimetype="text/plain")
 
 
-# ================= RUN =================
+def scrape_generator(log):
+    buffer = []
+
+    def _log(msg):
+        buffer.append(msg + "\n")
+
+    scrape_events(_log)
+
+    for line in buffer:
+        yield line
+
+
+# ===================== MAIN =====================
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
