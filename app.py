@@ -22,8 +22,7 @@ TIMEOUT = 30
 # ================= GOOGLE SHEETS =================
 
 def get_sheet():
-    creds_json = os.environ["GOOGLE_CREDS_JSON"]
-    creds_dict = json.loads(creds_json)
+    creds_dict = json.loads(os.environ["GOOGLE_CREDS_JSON"])
 
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -32,9 +31,7 @@ def get_sheet():
 
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
-
-    sheet = client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
-    return sheet
+    return client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
 
 
 def ensure_header(sheet):
@@ -58,11 +55,11 @@ def ensure_header(sheet):
 
 
 def existing_urls(sheet):
-    urls = set()
-    for row in sheet.get_all_records():
-        if row.get("detail_url"):
-            urls.add(row["detail_url"])
-    return urls
+    return {
+        r["detail_url"]
+        for r in sheet.get_all_records()
+        if r.get("detail_url")
+    }
 
 # ================= SCRAPING =================
 
@@ -72,7 +69,7 @@ def browse_url(offset):
 
 def parse_list(html):
     soup = BeautifulSoup(html, "html.parser")
-    events = []
+    events = {}
 
     for a in soup.find_all("a", href=True):
         if "/tools/european-training-calendar/training/" not in a["href"]:
@@ -83,26 +80,20 @@ def parse_list(html):
             href = BASE_URL + href
 
         title = a.get_text(strip=True)
-        if not title:
-            continue
+        if title:
+            events[href] = {"title": title, "detail_url": href}
 
-        events.append({
-            "title": title,
-            "detail_url": href
-        })
-
-    return list({e["detail_url"]: e for e in events}.values())
+    return list(events.values())
 
 
 def parse_detail(html):
     soup = BeautifulSoup(html, "html.parser")
 
-    def text_after(label):
-        el = soup.find(string=lambda s: s and label in s)
+    def find_text(label):
+        el = soup.find(string=lambda s: s and label.lower() in s.lower())
         if not el:
             return ""
-        parent = el.parent
-        nxt = parent.find_next_sibling()
+        nxt = el.parent.find_next_sibling()
         return nxt.get_text(" ", strip=True) if nxt else ""
 
     infopack = ""
@@ -120,28 +111,31 @@ def parse_detail(html):
             break
 
     return {
-        "type": text_after("Type"),
-        "participants_no": text_after("Participants"),
-        "participants_from": text_after("from"),
-        "recommended_for": text_after("recommended for"),
-        "working_language": text_after("Working language"),
-        "organiser": text_after("Organiser"),
-        "accessibility": text_after("Accessibility"),
+        "type": find_text("Type"),
+        "participants_no": find_text("Participants"),
+        "participants_from": find_text("from"),
+        "recommended_for": find_text("recommended"),
+        "accessibility": find_text("Accessibility"),
+        "working_language": find_text("Working language"),
+        "organiser": find_text("Organiser"),
         "infopack_downloads": infopack,
         "application_procedure_url": app_proc,
     }
 
 
-def scrape(log):
+def scrape_generator():
+    yield "🚀 Scraping avviato"
+
     sheet = get_sheet()
     ensure_header(sheet)
-
     known = existing_urls(sheet)
+
     added = 0
     offset = 0
 
     while True:
-        log(f"📄 Pagina offset {offset}")
+        yield f"📄 Pagina offset {offset}"
+
         r = requests.get(browse_url(offset), timeout=TIMEOUT)
         r.raise_for_status()
 
@@ -151,12 +145,13 @@ def scrape(log):
 
         for e in events:
             if e["detail_url"] in known:
+                yield f"⏭ {e['title']}"
                 continue
 
-            log(f"➡️ {e['title']}")
+            yield f"➡️ {e['title']}"
+
             d = requests.get(e["detail_url"], timeout=TIMEOUT)
             d.raise_for_status()
-
             detail = parse_detail(d.text)
 
             sheet.append_row([
@@ -176,13 +171,13 @@ def scrape(log):
 
             known.add(e["detail_url"])
             added += 1
-            log(f"🆕 aggiunto")
+            yield "🆕 aggiunto"
             time.sleep(1)
 
         offset += OFFSET_STEP
         time.sleep(1)
 
-    log(f"✅ Nuovi eventi aggiunti: {added}")
+    yield f"✅ Nuovi eventi aggiunti: {added}"
 
 # ================= FLASK =================
 
@@ -205,14 +200,12 @@ def index():
     </script>
     """
 
+
 @app.route("/api/scrape")
 def api_scrape():
     def stream():
-        try:
-            yield "🚀 Scraping avviato\n"
-            scrape(lambda m: (yield m))
-        except Exception as e:
-            yield f"❌ {str(e)}\n"
+        for msg in scrape_generator():
+            yield f"data: {msg}\n\n"
 
     return Response(stream(), mimetype="text/event-stream")
 
