@@ -1,24 +1,22 @@
-# IMPORTANTE: monkey patching di gevent PRIMA di qualsiasi altro import
+# ===================== GEVENT PATCH =====================
 from gevent import monkey
 monkey.patch_all()
 
+# ===================== IMPORT =====================
 import os
 import time
-import csv
-import re
 import json
-from io import StringIO
-from flask import Flask, jsonify, request, render_template
+import re
+import requests
+from datetime import date
+from flask import Flask, jsonify, render_template, request
 from flask_socketio import SocketIO
 from bs4 import BeautifulSoup
-import requests
 
 import gspread
 from google.oauth2.service_account import Credentials
 
-
 # ===================== CONFIG =====================
-
 BASE_URL = "https://www.salto-youth.net"
 SPREADSHEET_NAME = "SALTO-EVENTS"
 WORKSHEET_NAME = "SALTO-EVENTS"
@@ -26,190 +24,170 @@ WORKSHEET_NAME = "SALTO-EVENTS"
 DEFAULT_MAX_PAGES = 50
 PAGE_SIZE = 10
 
+# ordine colonne FISSO
+HEADERS = [
+    "title", "type", "dates", "location", "application_deadline",
+    "participants_no", "participants_from", "recommended_for",
+    "accessibility", "working_language", "organiser",
+    "participation_fee", "accommodation_food", "travel_reimbursement",
+    "infopack_downloads", "application_procedure_url",
+    "application_form_link", "detail_url",
+    "training_summary", "training_description"
+]
+
+# ===================== APP =====================
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "secret!"
+app.config["SECRET_KEY"] = "secret"
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-
-# ===================== GOOGLE SHEETS =====================
-
+# ===================== GOOGLE SHEET =====================
 def get_gsheet():
     creds_json = os.environ.get("GOOGLE_CREDS_JSON")
-    if not creds_json:
-        raise RuntimeError("GOOGLE_CREDS_JSON non impostato")
-
     creds_dict = json.loads(creds_json)
 
     scopes = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
 
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-
     client = gspread.authorize(creds)
+
     sheet = client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
+
+    # header garantito
+    if sheet.row_count == 0 or sheet.row_values(1) != HEADERS:
+        sheet.clear()
+        sheet.append_row(HEADERS)
 
     return sheet
 
-
-# ===================== SCRAPING =====================
-
-def build_search_url(offset: int) -> str:
+# ===================== SCRAPER =====================
+def build_search_url(offset):
+    today = date.today()
     return (
         "https://www.salto-youth.net/tools/european-training-calendar/browse/"
-        f"?b_offset={offset}&b_limit={PAGE_SIZE}"
+        f"?b_offset={offset}&b_limit=10"
         "&b_order=applicationDeadline"
+        f"&b_begin_date_after_day={today.day}"
+        f"&b_begin_date_after_month={today.month}"
+        f"&b_begin_date_after_year={today.year}"
     )
-
 
 def parse_list_page(html):
     soup = BeautifulSoup(html, "html.parser")
     events = []
-    seen = set()
 
-    for link in soup.select("a[href*='/tools/european-training-calendar/training/']"):
-        title = link.get_text(strip=True)
-        if not title:
-            continue
-
-        url = link.get("href", "").strip()
-        if not url:
-            continue
-
+    for a in soup.select("h3 a"):
+        title = a.get_text(strip=True)
+        url = a.get("href", "")
         if not url.startswith("http"):
             url = BASE_URL + url
 
-        if url in seen:
-            continue
-
-        seen.add(url)
-
-        container = link.find_parent("div")
-        text = container.get_text("\n", strip=True) if container else ""
-        lines = [l for l in text.split("\n") if l.strip()]
-
-        idx = lines.index(title) if title in lines else 0
+        block = a.parent.parent.get_text("\n", strip=True).split("\n")
 
         events.append({
             "title": title,
-            "type": lines[idx - 1] if idx > 0 else "",
-            "dates": lines[idx + 1] if idx + 1 < len(lines) else "",
-            "location": lines[idx + 2] if idx + 2 < len(lines) else "",
+            "type": block[0] if len(block) > 0 else "",
+            "dates": block[2] if len(block) > 2 else "",
+            "location": block[3] if len(block) > 3 else "",
             "application_deadline": "",
             "detail_url": url
         })
 
     return events
 
-
 def parse_detail_page(html):
     soup = BeautifulSoup(html, "html.parser")
 
-    def get_section(label):
-        h = soup.find(lambda t: t.name in ["h3", "h4"] and label.lower() in t.get_text(strip=True).lower())
+    def text_after(label):
+        h = soup.find(lambda t: t.name in ["h3", "h4"] and label in t.get_text())
         if not h:
             return ""
-        parts = []
+        out = []
         for sib in h.find_next_siblings():
             if sib.name and sib.name.startswith("h"):
                 break
-            parts.append(sib.get_text(" ", strip=True))
-        return " ".join(parts)
-
-    summary = soup.find("div", class_=re.compile("training-summary"))
-    description = soup.find("div", class_=re.compile("training-description"))
+            out.append(sib.get_text(" ", strip=True))
+        return " ".join(out)
 
     return {
         "participants_no": "",
         "participants_from": "",
         "recommended_for": "",
-        "accessibility": get_section("Accessibility"),
-        "working_language": "",
-        "organiser": "",
-        "participation_fee": get_section("Participation fee"),
-        "accommodation_food": get_section("Accommodation"),
-        "travel_reimbursement": get_section("Travel reimbursement"),
+        "accessibility": text_after("Accessibility"),
+        "working_language": text_after("Working language"),
+        "organiser": text_after("Organiser"),
+        "participation_fee": text_after("Participation fee"),
+        "accommodation_food": text_after("Accommodation"),
+        "travel_reimbursement": text_after("Travel reimbursement"),
         "infopack_downloads": "",
         "application_procedure_url": "",
-        "training_summary": summary.get_text("\n", strip=True) if summary else "",
-        "training_description": description.get_text("\n", strip=True) if description else "",
+        "training_summary": soup.get_text(" ", strip=True)[:500],
+        "training_description": soup.get_text(" ", strip=True)[:1500]
     }
 
-
 def scrape_events():
+    socketio.emit("log", {"message": "🚀 Scraping avviato"})
+
+    sheet = get_gsheet()
+    existing_urls = set(sheet.col_values(HEADERS.index("detail_url") + 1)[1:])
+
     session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0"})
+    new_rows = []
 
-    events = {}
-    page = 0
-
-    while page < DEFAULT_MAX_PAGES:
+    for page in range(DEFAULT_MAX_PAGES):
         offset = page * PAGE_SIZE
-        socketio.emit("log", {"message": f"Pagina {page + 1}"})
+        socketio.emit("log", {"message": f"📄 Pagina {page + 1}"})
 
-        r = session.get(build_search_url(offset), timeout=20)
-        r.raise_for_status()
+        resp = session.get(build_search_url(offset), timeout=15)
+        events = parse_list_page(resp.text)
 
-        page_events = parse_list_page(r.text)
-        if not page_events:
+        if not events:
             break
 
-        for e in page_events:
-            events.setdefault(e["detail_url"], e)
+        for event in events:
+            is_new = event["detail_url"] not in existing_urls
+            status = "🆕 NEW" if is_new else "⏭ SKIP"
 
-        page += 1
-        time.sleep(1)
+            socketio.emit("log", {
+                "message": f"{status} | {event['title']} | {event['location']}"
+            })
 
-    socketio.emit("log", {"message": f"Eventi trovati: {len(events)}"})
+            if not is_new:
+                continue
 
-    for e in events.values():
-        try:
-            r = session.get(e["detail_url"], timeout=20)
-            r.raise_for_status()
-            e.update(parse_detail_page(r.text))
-            time.sleep(1)
-        except Exception:
-            continue
+            detail_resp = session.get(event["detail_url"], timeout=15)
+            event.update(parse_detail_page(detail_resp.text))
+            event["application_form_link"] = ""
 
-    return list(events.values())
+            row = [event.get(h, "") for h in HEADERS]
+            new_rows.append(row)
+            existing_urls.add(event["detail_url"])
 
-
-# ===================== EXPORT GOOGLE SHEETS =====================
-
-def export_to_google_sheet(events):
-    sheet = get_gsheet()
-
-    rows = sheet.get_all_records()
-    existing_urls = {r.get("detail_url") for r in rows if r.get("detail_url")}
-
-    new_rows = [e for e in events if e["detail_url"] not in existing_urls]
-
-    if not rows:
-        sheet.append_row(list(events[0].keys()))
+            time.sleep(0.5)
 
     if new_rows:
-        sheet.append_rows([list(e.values()) for e in new_rows])
-        socketio.emit("log", {"message": f"Aggiunti {len(new_rows)} nuovi eventi"})
-    else:
-        socketio.emit("log", {"message": "Nessun evento nuovo"})
+        sheet.append_rows(new_rows, value_input_option="USER_ENTERED")
 
+    socketio.emit("log", {"message": f"✅ Nuovi eventi aggiunti: {len(new_rows)}"})
+    return len(new_rows)
 
 # ===================== ROUTES =====================
-
 @app.route("/")
 def index():
     return render_template("index.html")
 
-
-@app.route("/api/scrape", methods=["GET", "POST"])
+@app.route("/api/scrape", methods=["GET"])
 def api_scrape():
-    events = scrape_events()
-    export_to_google_sheet(events)
-    return jsonify({"status": "ok", "count": len(events)})
+    count = scrape_events()
+    return jsonify({"status": "ok", "new_events": count})
 
+@socketio.on("start_scraping")
+def handle_start_scraping():
+    scrape_events()
 
-# ===================== MAIN =====================
-
+# ===================== RUN =====================
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    socketio.run(app, host="0.0.0.0", port=port)
