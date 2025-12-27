@@ -38,30 +38,32 @@ SCOPES = [
 # ================= GOOGLE SHEET =================
 
 def get_gsheet():
-    creds_json = os.environ.get("GOOGLE_CREDS_JSON")
-    creds_dict = json.loads(creds_json)
-
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    client = gspread.authorize(creds)
+    creds = json.loads(os.environ["GOOGLE_CREDS_JSON"])
+    credentials = Credentials.from_service_account_info(creds, scopes=SCOPES)
+    client = gspread.authorize(credentials)
 
     sheet = client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
 
-    # CREA HEADER SE FOGLIO VUOTO
-    if sheet.row_count == 0 or not sheet.get_all_values():
+    values = sheet.get_all_values()
+    if not values:
         sheet.append_row(HEADERS)
 
     return sheet
 
 
+def get_existing_urls(sheet):
+    records = sheet.get_all_records()
+    return {r["detail_url"] for r in records if r.get("detail_url")}
+
+
 # ================= SCRAPING =================
 
-def scrape_list_page(offset):
-    params = {
-        "b_offset": offset,
-        "b_limit": 10,
-        "b_order": "applicationDeadline"
-    }
-    r = requests.get(BROWSE_URL, params=params, timeout=30)
+def scrape_list(offset):
+    r = requests.get(
+        BROWSE_URL,
+        params={"b_offset": offset, "b_limit": 10},
+        timeout=30
+    )
     r.raise_for_status()
     return r.text
 
@@ -70,19 +72,18 @@ def parse_list(html):
     soup = BeautifulSoup(html, "html.parser")
     events = []
 
-    for item in soup.select(".search-results-list .tool-item"):
+    for item in soup.select(".tool-item"):
         a = item.select_one("h2 a")
         if not a:
             continue
 
-        title = a.get_text(strip=True)
-        detail_url = a["href"]
-        if not detail_url.startswith("http"):
-            detail_url = BASE_URL + detail_url
+        url = a["href"]
+        if not url.startswith("http"):
+            url = BASE_URL + url
 
         events.append({
-            "title": title,
-            "detail_url": detail_url
+            "title": a.get_text(strip=True),
+            "detail_url": url
         })
 
     return events
@@ -91,16 +92,16 @@ def parse_list(html):
 def parse_detail(html):
     soup = BeautifulSoup(html, "html.parser")
 
-    data = {k: "" for k in HEADERS}
+    data = {h: "" for h in HEADERS}
     data["posted_to_instagram"] = "FALSE"
 
     cat = soup.select_one("span.h3.tool-item-category")
     if cat:
         data["type"] = cat.get_text(strip=True)
 
-    a = soup.select_one("ul.downloads-list a[href]")
-    if a:
-        data["infopack_downloads"] = BASE_URL + a["href"] if a["href"].startswith("/") else a["href"]
+    d = soup.select_one("ul.downloads-list a")
+    if d:
+        data["infopack_downloads"] = BASE_URL + d["href"] if d["href"].startswith("/") else d["href"]
 
     for a in soup.select('a[href*="/application-procedure/"]'):
         data["application_procedure_url"] = BASE_URL + a["href"] if a["href"].startswith("/") else a["href"]
@@ -109,27 +110,24 @@ def parse_detail(html):
     h = soup.find("h3", string="Training overview")
     if h:
         for p in h.find_next_siblings("p"):
-            txt = p.get_text(" ", strip=True)
-
+            t = p.get_text(" ", strip=True)
             if p.find("span", string="for"):
-                data["participants_no"] = txt.replace("participants", "").strip()
-
+                data["participants_no"] = t.replace("participants", "").strip()
             elif p.find("span", string="from"):
-                data["participants_from"] = txt.replace("from", "").strip()
-
-            elif "recommended for" in txt.lower():
-                nxt = p.find_next_sibling("p")
-                if nxt:
-                    data["recommended_for"] = nxt.get_text(" ", strip=True)
+                data["participants_from"] = t.replace("from", "").strip()
+            elif "recommended for" in t.lower():
+                n = p.find_next_sibling("p")
+                if n:
+                    data["recommended_for"] = n.get_text(" ", strip=True)
 
     h = soup.find("h3", string="Accessibility")
     if h:
-        parts = []
-        for sib in h.find_next_siblings():
-            if sib.name and sib.name.startswith("h"):
+        txt = []
+        for s in h.find_next_siblings():
+            if s.name and s.name.startswith("h"):
                 break
-            parts.append(sib.get_text(" ", strip=True))
-        data["accessibility"] = " ".join(parts)
+            txt.append(s.get_text(" ", strip=True))
+        data["accessibility"] = " ".join(txt)
 
     for p in soup.select(".microcopy"):
         if "language" in p.get_text().lower():
@@ -137,32 +135,9 @@ def parse_detail(html):
 
     for p in soup.find_all("p"):
         if p.get_text(strip=True).lower().startswith("organiser"):
-            data["organiser"] = p.get_text(strip=True).split(":", 1)[-1].strip()
+            data["organiser"] = p.get_text().split(":", 1)[-1].strip()
 
     return data
-
-
-# ================= EXPORT =================
-
-def export_to_google_sheet(events, log):
-    sheet = get_gsheet()
-
-    rows = sheet.get_all_records()
-    existing_urls = {r["detail_url"] for r in rows if r.get("detail_url")}
-
-    added = 0
-
-    for ev in events:
-        if ev["detail_url"] in existing_urls:
-            log.append("🔁 GIÀ ESISTENTE")
-            continue
-
-        row = [ev.get(h, "") for h in HEADERS]
-        sheet.append_row(row)
-        added += 1
-        log.append("➕ AGGIUNTO")
-
-    return added
 
 
 # ================= FLASK =================
@@ -171,50 +146,53 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return """
-    <h2>SALTO Events Scraper</h2>
-    <a href="/api/scrape">▶ Avvia scraping</a>
-    """
+    return '<a href="/api/scrape">▶ Avvia scraping</a>'
+
 
 @app.route("/api/scrape")
-def api_scrape():
+def scrape():
 
-    def generate():
+    def stream():
         yield "🚀 Scraping avviato\n\n"
+
+        sheet = get_gsheet()
+        existing_urls = get_existing_urls(sheet)
 
         offset = 0
         page = 1
-        all_events = []
+        added = 0
 
         while True:
             yield f"📄 Pagina {page}\n"
-            html = scrape_list_page(offset)
-            events = parse_list(html)
+            events = parse_list(scrape_list(offset))
 
             if not events:
                 break
 
             for ev in events:
                 yield f"🔍 {ev['title']}\n"
+
+                if ev["detail_url"] in existing_urls:
+                    yield "🔁 GIÀ ESISTENTE\n\n"
+                    continue
+
                 r = requests.get(ev["detail_url"], timeout=30)
                 ev.update(parse_detail(r.text))
-                all_events.append(ev)
+
+                row = [ev[h] for h in HEADERS]
+                sheet.append_row(row)
+
+                existing_urls.add(ev["detail_url"])
+                added += 1
+                yield "➕ AGGIUNTO\n\n"
 
             offset += 10
             page += 1
             time.sleep(1)
 
-        yield f"\n📊 Eventi trovati: {len(all_events)}\n\n"
-
-        log = []
-        added = export_to_google_sheet(all_events, log)
-
-        for l in log:
-            yield f"{l}\n"
-
         yield f"\n✅ Nuovi eventi aggiunti: {added}\n"
 
-    return Response(generate(), mimetype="text/plain")
+    return Response(stream(), mimetype="text/plain")
 
 
 # ================= RUN =================
