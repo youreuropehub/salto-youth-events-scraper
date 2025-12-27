@@ -15,6 +15,21 @@ BROWSE_URL = "https://www.salto-youth.net/tools/european-training-calendar/brows
 SPREADSHEET_NAME = "SALTO-EVENTS"
 WORKSHEET_NAME = "SALTO-EVENTS"
 
+HEADERS = [
+    "title",
+    "detail_url",
+    "type",
+    "infopack_downloads",
+    "application_procedure_url",
+    "participants_no",
+    "participants_from",
+    "recommended_for",
+    "accessibility",
+    "working_language",
+    "organiser",
+    "posted_to_instagram"
+]
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
@@ -29,7 +44,13 @@ def get_gsheet():
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     client = gspread.authorize(creds)
 
-    return client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
+    sheet = client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
+
+    # CREA HEADER SE FOGLIO VUOTO
+    if sheet.row_count == 0 or not sheet.get_all_values():
+        sheet.append_row(HEADERS)
+
+    return sheet
 
 
 # ================= SCRAPING =================
@@ -70,37 +91,21 @@ def parse_list(html):
 def parse_detail(html):
     soup = BeautifulSoup(html, "html.parser")
 
-    # defaults
-    data = {
-        "type": "",
-        "infopack_downloads": "",
-        "application_procedure_url": "",
-        "participants_no": "",
-        "participants_from": "",
-        "recommended_for": "",
-        "accessibility": "",
-        "working_language": "",
-        "organiser": ""
-    }
+    data = {k: "" for k in HEADERS}
+    data["posted_to_instagram"] = "FALSE"
 
-    # TYPE (category)
     cat = soup.select_one("span.h3.tool-item-category")
     if cat:
         data["type"] = cat.get_text(strip=True)
 
-    # INFO PACK
     a = soup.select_one("ul.downloads-list a[href]")
     if a:
-        href = a["href"]
-        data["infopack_downloads"] = href if href.startswith("http") else BASE_URL + href
+        data["infopack_downloads"] = BASE_URL + a["href"] if a["href"].startswith("/") else a["href"]
 
-    # APPLICATION PROCEDURE
     for a in soup.select('a[href*="/application-procedure/"]'):
-        href = a["href"]
-        data["application_procedure_url"] = href if href.startswith("http") else BASE_URL + href
+        data["application_procedure_url"] = BASE_URL + a["href"] if a["href"].startswith("/") else a["href"]
         break
 
-    # TRAINING OVERVIEW (SOLID STRUCTURE)
     h = soup.find("h3", string="Training overview")
     if h:
         for p in h.find_next_siblings("p"):
@@ -117,7 +122,6 @@ def parse_detail(html):
                 if nxt:
                     data["recommended_for"] = nxt.get_text(" ", strip=True)
 
-    # ACCESSIBILITY
     h = soup.find("h3", string="Accessibility")
     if h:
         parts = []
@@ -127,12 +131,10 @@ def parse_detail(html):
             parts.append(sib.get_text(" ", strip=True))
         data["accessibility"] = " ".join(parts)
 
-    # WORKING LANGUAGE
     for p in soup.select(".microcopy"):
         if "language" in p.get_text().lower():
             data["working_language"] = p.get_text(strip=True)
 
-    # ORGANISER
     for p in soup.find_all("p"):
         if p.get_text(strip=True).lower().startswith("organiser"):
             data["organiser"] = p.get_text(strip=True).split(":", 1)[-1].strip()
@@ -145,51 +147,22 @@ def parse_detail(html):
 def export_to_google_sheet(events, log):
     sheet = get_gsheet()
 
-    headers = [
-        "title",
-        "detail_url",
-        "type",
-        "infopack_downloads",
-        "application_procedure_url",
-        "participants_no",
-        "participants_from",
-        "recommended_for",
-        "accessibility",
-        "working_language",
-        "organiser",
-        "posted_to_instagram"
-    ]
+    rows = sheet.get_all_records()
+    existing_urls = {r["detail_url"] for r in rows if r.get("detail_url")}
 
-    existing = sheet.get_all_records()
-    existing_urls = {row["detail_url"] for row in existing if row.get("detail_url")}
-
-    new_rows = []
+    added = 0
 
     for ev in events:
         if ev["detail_url"] in existing_urls:
+            log.append("🔁 GIÀ ESISTENTE")
             continue
 
-        row = [
-            ev["title"],
-            ev["detail_url"],
-            ev["type"],
-            ev["infopack_downloads"],
-            ev["application_procedure_url"],
-            ev["participants_no"],
-            ev["participants_from"],
-            ev["recommended_for"],
-            ev["accessibility"],
-            ev["working_language"],
-            ev["organiser"],
-            "FALSE"
-        ]
-        new_rows.append(row)
-        log.append(f"➕ Aggiunto: {ev['title']}")
+        row = [ev.get(h, "") for h in HEADERS]
+        sheet.append_row(row)
+        added += 1
+        log.append("➕ AGGIUNTO")
 
-    if new_rows:
-        sheet.append_rows(new_rows, value_input_option="RAW")
-
-    return len(new_rows)
+    return added
 
 
 # ================= FLASK =================
@@ -203,16 +176,15 @@ def index():
     <a href="/api/scrape">▶ Avvia scraping</a>
     """
 
-
 @app.route("/api/scrape")
 def api_scrape():
 
     def generate():
         yield "🚀 Scraping avviato\n\n"
 
-        all_events = []
         offset = 0
         page = 1
+        all_events = []
 
         while True:
             yield f"📄 Pagina {page}\n"
@@ -223,20 +195,24 @@ def api_scrape():
                 break
 
             for ev in events:
+                yield f"🔍 {ev['title']}\n"
                 r = requests.get(ev["detail_url"], timeout=30)
-                detail = parse_detail(r.text)
-                ev.update(detail)
+                ev.update(parse_detail(r.text))
                 all_events.append(ev)
-                yield f"   🔍 {ev['title']}\n"
 
             offset += 10
             page += 1
             time.sleep(1)
 
-        yield f"\n📊 Eventi trovati: {len(all_events)}\n"
+        yield f"\n📊 Eventi trovati: {len(all_events)}\n\n"
 
-        added = export_to_google_sheet(all_events, [])
-        yield f"✅ Nuovi eventi aggiunti: {added}\n"
+        log = []
+        added = export_to_google_sheet(all_events, log)
+
+        for l in log:
+            yield f"{l}\n"
+
+        yield f"\n✅ Nuovi eventi aggiunti: {added}\n"
 
     return Response(generate(), mimetype="text/plain")
 
